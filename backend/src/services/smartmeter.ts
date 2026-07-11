@@ -369,7 +369,9 @@ export type SmartMeterPatientItem = {
   last_name?: string;
   dob?: string;
   sex?: string;
-  phone?: string;
+  phone?: string;        // some API versions return phone here
+  mobile_phone?: string; // others return it here
+  cell_phone?: string;   // or here
   insurance_type?: string;
   primary_diagnosis?: string;
   language?: string;

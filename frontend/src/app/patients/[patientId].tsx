@@ -1,4 +1,4 @@
-import { Stack, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Activity, AlertTriangle, Bell, Calendar, CheckCircle2, ChevronLeft, ChevronRight,
   ClipboardList, Copy, FileText, HeartPulse, Link2, Link2Off, MessageSquare, Phone, Play,
@@ -2241,6 +2241,7 @@ export default function PatientDetail() {
   const { patientId, tab: initialTab } = useLocalSearchParams<{ patientId: string; tab?: string }>();
   const colors = useTheme();
   const { session } = useAuth();
+  const router = useRouter();
   const [tab, setTab]         = useState<Tab>(TABS.includes(initialTab as Tab) ? initialTab as Tab : 'Info');
   const [patient, setPatient] = useState<Patient | null>(null);
   const [smDetail, setSmDetail] = useState<SmartMeterDetail | null>(null);
@@ -2466,13 +2467,19 @@ export default function PatientDetail() {
         <SectionLabel text="Quick Actions" colors={colors} />
         <View style={s.actionsGrid}>
           {([
-            { icon: Phone,         label: 'Call'     },
-            { icon: MessageSquare, label: 'SMS'      },
-            { icon: FileText,      label: 'Note'     },
-            { icon: AlertTriangle, label: 'Escalate' },
-            { icon: ClipboardList, label: 'Task'     },
-          ] as { icon: LucideIcon; label: string }[]).map(({ icon: Icon, label }) => (
-            <Pressable key={label} style={[s.actionBtn, { borderColor: colors.border }]}>
+            {
+              icon: Phone, label: 'Call',
+              onPress: () => router.push({ pathname: '/communications', params: { patientId, action: 'call' } }),
+            },
+            {
+              icon: MessageSquare, label: 'SMS',
+              onPress: () => router.push({ pathname: '/communications', params: { patientId, action: 'sms' } }),
+            },
+            { icon: FileText,      label: 'Note',     onPress: undefined },
+            { icon: AlertTriangle, label: 'Escalate', onPress: undefined },
+            { icon: ClipboardList, label: 'Task',     onPress: undefined },
+          ] as { icon: LucideIcon; label: string; onPress: (() => void) | undefined }[]).map(({ icon: Icon, label, onPress }) => (
+            <Pressable key={label} style={[s.actionBtn, { borderColor: colors.border }]} onPress={onPress}>
               <Icon size={16} color={colors.primary} strokeWidth={1.75} />
               <Text style={[s.actionLabel, { color: colors.text }]}>{label}</Text>
             </Pressable>

@@ -4,6 +4,7 @@ import { HeartPulse, LogOut } from "lucide-react-native";
 import { Pressable, StyleSheet, Text, View } from "react-native";
 import { useAuth } from "@/contexts/auth-context";
 import { ROLE_META, useRole } from "@/contexts/role-context";
+import { useUnread } from "@/contexts/unread-context";
 import { navItems } from "@/constants/nav-items";
 import { useTheme } from "@/hooks/use-theme";
 
@@ -11,6 +12,7 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
   const colors = useTheme();
   const { role } = useRole();
   const { session, logout } = useAuth();
+  const { total: unreadTotal } = useUnread();
   const router = useRouter();
   const pathname = usePathname();
   const visible = navItems.filter((n) => !n.roles || n.roles.includes(role));
@@ -71,6 +73,11 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                   ]}>
                   {item.label}
                 </Text>
+                {item.route === '/communications' && unreadTotal > 0 && (
+                  <View style={styles.badge}>
+                    <Text style={styles.badgeText}>{unreadTotal > 99 ? '99+' : unreadTotal}</Text>
+                  </View>
+                )}
               </Pressable>
             );
           })}
@@ -145,11 +152,21 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 4,
     borderBottomRightRadius: 4,
   },
-  itemLabel: { fontSize: 13.5, fontWeight: "500" },
+  itemLabel: { fontSize: 13.5, fontWeight: "500", flex: 1 },
   itemLabelActive: { fontWeight: "700" },
   subItem:  { paddingLeft: 36, paddingVertical: 7 },
   subLabel: { fontSize: 12.5 },
   subConnector: { position: "absolute", left: 22, top: 0, bottom: 0, width: 10, borderLeftWidth: 1, borderBottomWidth: 1, borderBottomLeftRadius: 4 },
+  badge: {
+    backgroundColor: "#2563eb",
+    borderRadius: 9,
+    minWidth: 18,
+    height: 18,
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 5,
+  },
+  badgeText: { color: "#fff", fontSize: 10, fontWeight: "700" },
   footer: {
     flexDirection: "row",
     alignItems: "center",

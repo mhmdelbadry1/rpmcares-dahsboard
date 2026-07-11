@@ -25,6 +25,7 @@ const app = express();
 
 app.use(cors({ origin: env.CORS_ORIGIN }));
 app.use(express.json());
+app.use(express.urlencoded({ extended: false })); // Twilio webhooks POST as x-www-form-urlencoded
 
 // Strict limit on auth endpoints to prevent brute-force attacks
 const authLimiter = rateLimit({

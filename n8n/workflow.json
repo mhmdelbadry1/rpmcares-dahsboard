@@ -1,0 +1,1688 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "from": "+16513940049",
+        "to": "={{ $json.patientPhone }}",
+        "message": "={{ $json.modules && $json.modules.includes('RTM') ? 'Hi ' + $json.patientName + ', this is ' + $json.clinicName + '. Please remember to take your medication today using your Pillbox. Thank you' : 'Hi ' + $json.patientName + ', this is a reminder from ' + $json.clinicName + ' to check your blood pressure and/or glucose today. Your doctor reviews your readings and uses them to help manage your health. Thank you.' }}",
+        "options": {}
+      },
+      "id": "eea5a84d-2ba1-4663-a0b8-d1a9245a220d",
+      "name": "Send Reminder SMS",
+      "type": "n8n-nodes-base.twilio",
+      "typeVersion": 1,
+      "position": [
+        -15040,
+        10256
+      ],
+      "credentials": {
+        "twilioApi": {
+          "id": "Rzgyx1QxjOeRvVfC",
+          "name": "Twilio account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "13sLwjxV5j7Ig3Ov06zWIGK1pSzzCI5D4q9iqHV7DFq0",
+          "mode": "list",
+          "cachedResultName": "Monitoring Reporting _ All Clinics",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/13sLwjxV5j7Ig3Ov06zWIGK1pSzzCI5D4q9iqHV7DFq0/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "The original",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/13sLwjxV5j7Ig3Ov06zWIGK1pSzzCI5D4q9iqHV7DFq0/edit#gid=0"
+        },
+        "options": {}
+      },
+      "id": "a552e28a-5ba8-4f4b-bbab-eb95d065bcb2",
+      "name": "Load Thresholds & Contacts",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -17952,
+        9776
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1LrAxNu4bLDDe4ShcSywUgXmI0NR9GGPgRDoCFYKlSfE",
+          "mode": "list",
+          "cachedResultName": "Clinic_API_Credentials",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1LrAxNu4bLDDe4ShcSywUgXmI0NR9GGPgRDoCFYKlSfE/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "Clinic Credentials",
+          "mode": "name"
+        },
+        "options": {}
+      },
+      "id": "d4720072-7bc7-47e3-a1e1-0cfa0919e2a7",
+      "name": "Load Clinic Credentials",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -17952,
+        9968
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\n\nconst firstValidRow = rows.find(r => r.json['Column 1'] && !r.json['Column 1'].toLowerCase().includes('column'));\nif (!firstValidRow) return [{ json: { clinicMap: {} } }];\nconst baseNC = String(firstValidRow.json['Abnormal Non Critical (Email Only)'] || firstValidRow.json['Abnormal Non Critical'] || '');\nconst baseCrit = String(firstValidRow.json['Abnormal Critical (Call the patient to repreat the reading and call the clinic and text the NP)'] || firstValidRow.json['Abnormal Critical'] || '');\n\nfunction extractBaseline(nc, crit) {\n    const s_nc = nc.toUpperCase();\n    const s_crit = crit.toUpperCase();\n\n    const bpNC   = parseInt(s_nc.match(/BP\\s*[>≥]\\s*(\\d+)/)?.[1] || 160, 10);\n    const bpCrit = parseInt(s_crit.match(/BP\\s*[>≥]\\s*(\\d+)/)?.[1] || 190, 10);\n\n    return {\n        bpHigh:     bpNC,\n        bpHighCrit: bpCrit,\n        fbs: parseInt((s_nc + ' ' + s_crit).match(/FBS\\s*[>≥]\\s*(\\d+)/)?.[1] || 130, 10),\n        rbs: parseInt((s_nc + ' ' + s_crit).match(/RBS\\s*[>≥]\\s*(\\d+)/)?.[1] || 250, 10)\n    };\n}\n\nconst baseline = extractBaseline(baseNC, baseCrit);\nconst clinicMap = {};\n\nfor (const row of rows) {\n    const r = row.json;\n    const name = String(r['Column 1'] || r['Provider Name'] || '').trim();\n    if (!name || name.toLowerCase().includes('column')) continue;\n\n    const nc   = String(r['Abnormal Non Critical (Email Only)'] || r['Abnormal Non Critical'] || '').trim();\n    const crit = String(r['Abnormal Critical (Call the patient to repreat the reading and call the clinic and text the NP)'] || r['Abnormal Critical'] || '').trim();\n    const fullText = (nc + ' ' + crit).toUpperCase();\n\n    const rules = {\n        clinicName:          name,\n        bpSystolicHighNC:    baseline.bpHigh,\n        bpSystolicHighCrit:  baseline.bpHighCrit,\n        fbsHigh:             baseline.fbs,\n        rbsHigh:             baseline.rbs,\n        rtmDays:             fullText.includes('2 CONSECUTIVE DAYS') ? 2 : 5,\n\n        providerEmail: String(r['Provider Email ID'] || '')\n            .split(/\\s+and\\s+|,/)\n            .map(e => e.trim())\n            .filter(e => e.includes('@')),\n\n        npPhone: String(r['NP/PA Contact Details'] || '').trim()\n            .replace(/[^\\d]/g, '')\n            .replace(/^1?(\\d{10})$/, '+1$1'),\n\n        clinicPhone:    String(r['Clinic Phone no'] || '').trim(),\n        nurseMA:        String(r['Nurse/MA'] || '').trim(),\n        pointOfContact: String(r['Clinic Point of Contact'] || '').trim(),\n        emergencyContact: String(r['Emergency Contact (During Business Hours M-F 8AM-5PM Texas time'] || r['Emergency Contact'] || '').trim()\n    };\n\n    clinicMap[name.toLowerCase()] = rules;\n}\n\nreturn [{ json: { clinicMap } }];"
+      },
+      "id": "972cf545-2bbf-4273-8a67-9a1216731225",
+      "name": "Build Threshold Map",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -17728,
+        9776
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const rows = $input.all();\nconst clinics = [];\nfor (const row of rows) {\n  const r = row.json;\n  const values = Object.values(r);\n  const name = String(values[1] || '').trim();\n  const key = String(values[2] || '').trim();\n  const secret = String(values[3] || '').trim();\n  const active = String(values[4] || '').trim().toUpperCase();\n  if (active === 'YES') clinics.push({ name, key, secret });\n}\nreturn [{ json: { clinics } }];"
+      },
+      "id": "83fefd6a-9da2-4e73-8c5e-5c507e476fa3",
+      "name": "Build Clinic List",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -17728,
+        9968
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "94664ba3-f980-4645-8f93-973f42f26471",
+      "name": "Merge Setup",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -17504,
+        9872
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "AuditLog",
+          "mode": "name"
+        },
+        "options": {
+          "returnAllMatches": "returnAllMatches"
+        }
+      },
+      "id": "592861d5-57ca-4af4-b741-5f94f77b50ad",
+      "name": "Load Today's Alert IDs",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -17280,
+        9872
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 144888106,
+          "mode": "list",
+          "cachedResultName": "ReminderLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit#gid=144888106"
+        },
+        "options": {
+          "returnAllMatches": "returnAllMatches"
+        }
+      },
+      "id": "7d62cda4-0e55-4af9-872a-8567e42a21a6",
+      "name": "Load Reminder History",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -17056,
+        9872
+      ],
+      "alwaysOutputData": true,
+      "executeOnce": false,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const patientItems = $('Merge Patients').all();\nconst patientMap = {};\nfor (const p of patientItems) { if (p.json && p.json.__empty) continue; patientMap[p.json.patientId] = p.json; }\n\nconst clinicMapRaw = $('Build Threshold Map').first().json.clinicMap || {};\nconst clinicMap = {};\nfor (const key in clinicMapRaw) { clinicMap[key.trim().toLowerCase()] = clinicMapRaw[key]; }\n\nfunction normName(s) {\n  return String(s || '').toLowerCase()\n    .replace(/[.,&'/()\\-]/g, ' ')\n    .replace(/\\b(pllc|llc|pc|pa|md|do|np|inc|incorporated|group|the|of|and)\\b/g, ' ')\n    .replace(/\\s+/g, ' ').trim();\n}\nfunction stem(t) { return t.endsWith('s') && t.length > 3 ? t.slice(0, -1) : t; }\nfunction tokenSet(s) { return [...new Set(normName(s).split(' ').filter(Boolean).map(stem))]; }\nfunction levRatio(a, b) {\n  if (a === b) return 1;\n  if (!a.length || !b.length) return 0;\n  const m = a.length, n = b.length;\n  const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...new Array(n).fill(0)]);\n  for (let j = 0; j <= n; j++) dp[0][j] = j;\n  for (let i = 1; i <= m; i++)\n    for (let j = 1; j <= n; j++)\n      dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));\n  return 1 - dp[m][n] / Math.max(m, n);\n}\nfunction scoreSets(A, B) {\n  if (!A.length || !B.length) return 0;\n  const inter = A.filter(t => B.includes(t)).length;\n  const union = new Set([...A, ...B]).size;\n  const jaccard = inter / union;\n  const contain = inter / Math.min(A.length, B.length);\n  const charR   = levRatio([...A].sort().join(' '), [...B].sort().join(' '));\n  return Math.max(jaccard, charR, 0.5 * contain + 0.5 * jaccard);\n}\n\n// Precompute clinic-key token sets ONCE\nconst clinicKeys = Object.keys(clinicMap).map(k => ({ k, ts: tokenSet(k) }));\n\n// Resolve each distinct clinic name ONCE (memoized) — prevents the per-reading Levenshtein blowup\nconst resolveCache = new Map();\nfunction findClinicInfo(apiName) {\n  const needle = String(apiName || '').trim().toLowerCase();\n  if (resolveCache.has(needle)) return resolveCache.get(needle);\n\n  let result;\n  if (clinicMap[needle]) {\n    result = clinicMap[needle];\n  } else {\n    const nts = tokenSet(needle);\n    const ACCEPT = 0.72, MARGIN = 0.12;\n    let best = { s: -1, k: null }, second = { s: -1 };\n    for (const ck of clinicKeys) {\n      const s = scoreSets(nts, ck.ts);\n      if (s > best.s) { second = best; best = { s, k: ck.k }; }\n      else if (s > second.s) { second = { s }; }\n    }\n    result = (best.k && best.s >= ACCEPT && (best.s - second.s) >= MARGIN) ? clinicMap[best.k] : {};\n    if (result && Object.keys(result).length) console.log(`[CLINIC-MATCH] \"${apiName}\" -> \"${best.k}\" (${best.s.toFixed(2)})`);\n    else console.warn(`[CLINIC-NOMATCH] \"${apiName}\" (best \"${best.k}\" ${best.s >= 0 ? best.s.toFixed(2) : 0})`);\n  }\n  resolveCache.set(needle, result);\n  return result;\n}\n\nconst items = $input.all().filter(it => it.json && !it.json.__empty);\nconst enriched = [];\nlet droppedInactiveCount = 0, droppedOldCount = 0, activeKeptCount = 0;\n\nif (!items.length) { return [{ json: { __empty: true, notes: 'No readings to enrich' } }]; }\n\nconst lookbackHours = 264;\nconst cutoffTime = new Date(Date.now() - (lookbackHours * 60 * 60 * 1000));\n\nfor (const item of items) {\n  const r = item.json;\n  const patient = patientMap[r.patient_id || r.patientId];\n  if (patient) {\n    const readingTime = new Date(r.timestamp || r.date_recorded || r.date);\n    if (readingTime < cutoffTime) { droppedOldCount++; continue; }\n    const cNameRaw = r.__clinicName || patient.groupName || '';\n    const clinicInfo = findClinicInfo(cNameRaw);\n    enriched.push({ json: { ...r, patientName: patient.patientName, patientPhone: patient.phone, clinicName: cNameRaw, clinic: clinicInfo } });\n    activeKeptCount++;\n  } else { droppedInactiveCount++; }\n}\n\nconsole.log(`[DEBUG] Enrich Data: Kept ${activeKeptCount} RECENT readings. Dropped ${droppedInactiveCount} INACTIVE and ${droppedOldCount} OLD readings. (distinct clinics resolved: ${resolveCache.size})`);\nreturn enriched.length ? enriched : [{ json: { __empty: true, notes: 'No recent active readings found' } }];"
+      },
+      "id": "5cea75e7-15f8-4ca7-b191-8148be571d54",
+      "name": "Enrich Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -15712,
+        9872
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ===== CONFIG =====\nconst REMINDERS_ENABLED = true;\nconst PROGRAM_START      = '2026-06-22';\nconst COOLDOWN_DAYS      = 20;\nconst MAX_SMS_PER_RUN    = 2200; // hard cap — total patients is 2139, this catches runaway loops\nconst LADDER = [\n  { day: 2,  action: 'SMS',   type: 'DAY2_SMS' },\n  { day: 4,  action: 'SMS',   type: 'DAY4_SMS' },\n  { day: 5,  action: 'VOICE', type: 'DAY5_VOICE' },\n  { day: 7,  action: 'SMS',   type: 'DAY7_SMS' },\n  { day: 9,  action: 'SMS',   type: 'DAY9_SMS' },\n  { day: 10, action: 'VOICE', type: 'DAY10_VOICE' },\n];\nconst FINAL_TYPE = 'DAY10_VOICE';\n// ==================\n\nconst DAY_MS = 86400000;\nconst now = new Date();\n\nfunction chicagoDay(d) {\n  if (!d || isNaN(d)) return null;\n  return new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Chicago' }).format(d instanceof Date ? d : new Date(d));\n}\nfunction daysDiff(fromDate, toDate) {\n  const f = chicagoDay(fromDate), t = chicagoDay(toDate);\n  if (!f || !t) return 0;\n  return Math.floor((new Date(t) - new Date(f)) / DAY_MS);\n}\nfunction parseMDY(s) {\n  if (!s) return null;\n  const [m, d, y] = String(s).split('/').map(Number);\n  if (!y || isNaN(y)) return new Date(s);\n  return new Date(Date.UTC(y, m - 1, d, 18, 0, 0));\n}\nfunction parseYMD(s) {\n  const [y, m, d] = String(s).split('-').map(Number);\n  return new Date(Date.UTC(y, m - 1, d, 18, 0, 0));\n}\n\nconst programStart = parseYMD(PROGRAM_START);\nconst todayStr     = chicagoDay(now);\n\nconst enrichedItems = $input.all();\nconst patientsList  = $('Merge Patients').all();\n\n// FAIL CLOSED: empty/failed readings must not flag everyone\nconst hasReadings = enrichedItems.some(i => i.json && !i.json.__empty);\nif (!hasReadings) {\n  console.warn('[REMINDER] readings empty/failed — skipping (fail-closed).');\n  return [{ json: { __noRemindersNeeded: true, reason: 'fail-closed' } }];\n}\n\n// Last reading time per patient\nconst lastReadingMap = {};\nfor (const it of enrichedItems) {\n  const r = it.json; if (r.__empty) continue;\n  const pid = String(r.patientId || r.patient_id || '').trim();\n  const t = new Date(r.timestamp || r.date_recorded || r.date);\n  if (pid && !isNaN(t) && (!lastReadingMap[pid] || t > lastReadingMap[pid])) lastReadingMap[pid] = t;\n}\n\n// Reminder history per patient + same-day dedup set\nconst hist = {};\nconst alreadySentToday = new Set(); // patients who already got ANY reminder today\ntry {\n  for (const row of $('Load Reminder History').all()) {\n    const pid   = String(row.json.patient_id || '').trim();\n    const type  = String(row.json.type || '').trim();\n    const rawTs = String(row.json.timestamp || '').trim();\n    if (!pid || !type || !rawTs) continue;\n    const d = rawTs.includes('/') ? parseMDY(rawTs) : new Date(rawTs);\n    if (!d || isNaN(d)) continue;\n    (hist[pid] = hist[pid] || []).push({ type, date: d });\n    // Track anyone already contacted today (same Chicago calendar date)\n    if (chicagoDay(d) === todayStr) alreadySentToday.add(pid);\n  }\n} catch (e) { console.log('[ERROR] history load:', e.message); }\n\n// FIRST RUN: if ReminderLog has zero entries ever, blast everyone\nconst isFirstRun = Object.keys(hist).length === 0;\nif (isFirstRun) console.log('[REMINDER] FIRST RUN detected — sending SMS to all non-compliant patients.');\nconsole.log(`[REMINDER] Already sent today: ${alreadySentToday.size} patients (same-day dedup)`);\n\nconst out = [];\nconst counts = { SMS:0, VOICE:0, compliant:0, cooldown:0, nothingDue:0, noPhone:0, skippedToday:0 };\nconst bySrc  = { smartmeter:{SMS:0,VOICE:0,total:0}, tenovi:{SMS:0,VOICE:0,total:0} };\n\nfor (const p of patientsList) {\n  const pj = p.json; if (pj.__empty) continue;\n  const pid = String(pj.patientId || '').trim(); if (!pid) continue;\n  const src = pj.__source === 'tenovi' ? 'tenovi' : 'smartmeter';\n  bySrc[src].total++;\n\n  // HARD CAP: never exceed MAX_SMS_PER_RUN in one run\n  if (counts.SMS >= MAX_SMS_PER_RUN) {\n    console.warn(`[REMINDER] HARD CAP reached (${MAX_SMS_PER_RUN}) — stopping to prevent runaway spend.`);\n    break;\n  }\n\n  // SAME-DAY DEDUP: already contacted today → skip entirely\n  if (alreadySentToday.has(pid)) { counts.skippedToday++; continue; }\n\n  const last = lastReadingMap[pid] || null;\n\n  // Compliant: read within last 48 hours\n  if (last && (now - last) < 2 * DAY_MS) { counts.compliant++; continue; }\n\n  const phone = pj.phone;\n  const phoneValid = phone && String(phone).replace(/\\D/g, '').length >= 10;\n\n  if (!phoneValid) {\n    counts.noPhone++;\n    out.push({ json: {\n      patientId: pid, patientName: pj.patientName, patientPhone: '', clinicName: pj.groupName,\n      source: src, modules: pj.modules || 'RPM', daysMissing: 0,\n      actionType: 'DAY2_SMS_NOPHONE', action: 'NO_CONTACT', logStatus: 'NO_PHONE'\n    }});\n    continue;\n  }\n\n  // ── FIRST RUN: blast everyone non-compliant ────────────────────────\n  if (isFirstRun) {\n    out.push({ json: {\n      patientId: pid, patientName: pj.patientName, patientPhone: phone, clinicName: pj.groupName,\n      source: src, modules: pj.modules || 'RPM', daysMissing: 0,\n      actionType: 'DAY2_SMS', action: 'SMS', logStatus: 'SMS_SENT'\n    }});\n    counts.SMS++;\n    bySrc[src].SMS++;\n    continue;\n  }\n\n  // ── NORMAL LADDER (all runs after first) ──────────────────────────\n  const rows = hist[pid] || [];\n\n  let lastFinal = null;\n  for (const h of rows) {\n    if (h.type.replace('_NOPHONE', '') === FINAL_TYPE && (!last || chicagoDay(h.date) > chicagoDay(last))) {\n      if (!lastFinal || h.date > lastFinal) lastFinal = h.date;\n    }\n  }\n\n  if (lastFinal && daysDiff(lastFinal, now) < COOLDOWN_DAYS) { counts.cooldown++; continue; }\n\n  let anchor;\n  if (lastFinal) {\n    const lfStr = chicagoDay(lastFinal);\n    const [lfy, lfm, lfd] = lfStr.split('-').map(Number);\n    anchor = new Date(Date.UTC(lfy, lfm - 1, lfd + COOLDOWN_DAYS, 18, 0, 0));\n    if (last && last > anchor) anchor = last;\n  } else if (last) {\n    anchor = last;\n  } else {\n    anchor = programStart;\n  }\n  if (daysDiff(programStart, anchor) < 0) anchor = programStart;\n\n  const daysIn = daysDiff(anchor, now);\n  if (daysIn < LADDER[0].day) { counts.nothingDue++; continue; }\n\n  const firedThisLadder = rows\n    .filter(h => h.date >= anchor)\n    .map(h => h.type.replace('_NOPHONE', ''));\n  let maxFiredDay = -1;\n  for (const rung of LADDER) if (firedThisLadder.includes(rung.type) && rung.day > maxFiredDay) maxFiredDay = rung.day;\n\n  let target = null;\n  for (const rung of LADDER) if (rung.day <= daysIn && rung.day > maxFiredDay) target = rung;\n  if (!target) { counts.nothingDue++; continue; }\n\n  out.push({ json: {\n    patientId: pid, patientName: pj.patientName, patientPhone: phone, clinicName: pj.groupName,\n    source: src, modules: pj.modules || 'RPM', daysMissing: daysIn,\n    actionType: target.type, action: target.action,\n    logStatus: target.action === 'SMS' ? 'SMS_SENT' : 'VOICE_QUEUED'\n  }});\n  counts[target.action]++;\n  bySrc[src][target.action]++;\n}\n\nconsole.log(`[REMINDER] FIRST_RUN=${isFirstRun} | SMS=${counts.SMS}/${MAX_SMS_PER_RUN} cap | VOICE=${counts.VOICE} | compliant=${counts.compliant} skippedToday=${counts.skippedToday} cooldown=${counts.cooldown} nothingDue=${counts.nothingDue} noPhone=${counts.noPhone}`);\nconsole.log(`[REMINDER][BY SOURCE] SmartMeter ${JSON.stringify(bySrc.smartmeter)} | Tenovi ${JSON.stringify(bySrc.tenovi)}`);\n\nif (!REMINDERS_ENABLED) {\n  console.warn('[REMINDER] REMINDERS_ENABLED=false — computed only, sending nothing.');\n  return [{ json: { __noRemindersNeeded: true, reason: 'disabled' } }];\n}\nreturn out.length ? out : [{ json: { __noRemindersNeeded: true } }];"
+      },
+      "id": "960bc010-8d13-459d-9b37-cfdd78186f84",
+      "name": "Check Missing Readings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -15488,
+        9968
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 144888106,
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "patient_id": "={{ $json.patient_id }}",
+            "patient_name": "={{ $json.patient_name }}",
+            "type": "={{ $json.type }}",
+            "days_missing": "={{ $json.days_missing }}",
+            "status": "={{ $json.status }}",
+            "patient_phone": "={{ $json.patient_phone }}",
+            "clinic_name": "={{ $json.clinic_name }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_phone",
+              "displayName": "patient_phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "patient_id",
+              "displayName": "patient_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_name",
+              "displayName": "patient_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clinic_name",
+              "displayName": "clinic_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "days_missing",
+              "displayName": "days_missing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "015eece2-b861-44a8-8984-069c0c8898bb",
+      "name": "Log Reminder",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -14416,
+        9920
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst anomalies = [];\nconst nowCST = new Date().toLocaleString(\"en-US\", {timeZone: \"America/Chicago\", year: \"numeric\", month: \"2-digit\", day: \"2-digit\", hour: \"2-digit\", minute: \"2-digit\", hour12: true});\n\nif (items.length === 1 && items[0].json.__empty) {\n    return [{ json: { __noAnomalies: true, note: \"No data\" } }];\n}\n\nconst alreadyLogged = new Set();\ntry {\n  const auditRows = $(\"Load Today\\'s Alert IDs\").all();\n  for (const row of auditRows) {\n    const rid = String(row.json.reading_id || \"\").trim();\n    if (rid) alreadyLogged.add(rid);\n  }\n} catch(e) {}\n\nconst seenThisRun = new Set();\nlet skipNoClinic = 0, skipNoClinicTenovi = 0, skipOld = 0, skipOldTenovi = 0;\n\nfunction flag(r, clinic, alertType, label, value, unit, threshold, tier, direction) {\n  const readingId = String(r.reading_id || r.alert_id || r.readingId || r.id || \"\");\n  const pId = String(r.patient_id || r.patientId || \"\");\n  const dedupKey = pId + \"|\" + alertType + \"|\" + readingId;\n  if (readingId && alreadyLogged.has(readingId)) return false;\n  if (seenThisRun.has(dedupKey)) return false;\n\n  seenThisRun.add(dedupKey);\n  anomalies.push({ json: {\n    alertType, label, tier, direction, value, unit, threshold,\n    patientId: pId,\n    patientName: r.patientName,\n    clinicName: clinic.clinicName || r.__clinicName,\n    deviceType: r.device_type || r.deviceType || r.reading_type || \"\",\n    readingId,\n    timestamp: r.timestamp || r.date_recorded || r.date || \"\",\n    detectedAt: nowCST,\n    providerEmail: clinic.providerEmail || \"\",\n    npPhone: clinic.npPhone || \"\",\n    actionInstruction: tier === \"CRITICAL\" ? \"CRITICAL: Alert\" : \"NON-CRITICAL: Alert\"\n  }});\n  return true;\n}\n\nconst anomalyCutoff = new Date(Date.now() - (24 * 60 * 60 * 1000));\n\nfor (const item of items) {\n  const r = item.json;\n  if (!r.clinic || Object.keys(r.clinic).length === 0) {\n    skipNoClinic++;\n    if (r.__source === 'tenovi') skipNoClinicTenovi++;\n    continue;\n  }\n\n  const rTime = new Date(r.timestamp || r.date_recorded || r.date);\n  if (rTime < anomalyCutoff) {\n    skipOld++;\n    if (r.__source === 'tenovi') skipOldTenovi++;\n    continue;\n  }\n\n  const dt = String(r.device_type||r.deviceType||r.reading_type||\"\").toLowerCase();\n  if (dt.includes(\"blood_pressure\") || dt.includes(\"bp\")) {\n    const sys = parseFloat(r.systolic || r.systolic_mmhg);\n    if (!isNaN(sys)) {\n       if (r.clinic.bpSystolicHighCrit && sys >= r.clinic.bpSystolicHighCrit) flag(r,r.clinic,\"BP_HIGH\",\"High Systolic\",sys,\"mmHg\",r.clinic.bpSystolicHighCrit,\"CRITICAL\",\"HIGH\");\n       else if (r.clinic.bpSystolicHighNC && sys >= r.clinic.bpSystolicHighNC) flag(r,r.clinic,\"BP_HIGH\",\"High Systolic\",sys,\"mmHg\",r.clinic.bpSystolicHighNC,\"NON_CRITICAL\",\"HIGH\");\n    }\n  }\n  const isGlucose = dt.includes(\"blood_glucose\") || dt.includes(\"glucose\");\n  if (isGlucose) {\n    const gv = parseFloat(r.glucose || r.blood_glucose_mgdl || r.value || NaN);\n    const mtype = String(r.measurement_type||r.reading_type||\"\").toUpperCase();\n    const isFasting = mtype.includes(\"FBS\") || mtype.includes(\"FASTING\") || r.before_meal === true;\n    const highThr = isFasting ? r.clinic.fbsHigh : r.clinic.rbsHigh;\n    if (!isNaN(gv) && highThr && gv > highThr) {\n        flag(r,r.clinic,\"GLUCOSE_HIGH\",\"High Glucose\",gv,\"mg/dL\",highThr,gv > 250 ? \"CRITICAL\" : \"NON_CRITICAL\",\"HIGH\");\n    }\n  }\n}\nconsole.log(`[DEBUG] Detect: skipped ${skipNoClinic} no-clinic (${skipNoClinicTenovi} Tenovi), ${skipOld} older-than-24h (${skipOldTenovi} Tenovi). Fired ${anomalies.length}.`);\nreturn anomalies;"
+      },
+      "id": "45db8bf0-3318-4dff-9b50-3c5aecee41ad",
+      "name": "Detect Anomalies1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -15488,
+        9696
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.alertType }}",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty"
+              },
+              "id": "4c2e8bad-2215-4917-a1b0-4ab15f517d11"
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "528c1fcf-1329-443b-a849-e7c4a14d05d0",
+      "name": "Filter — Anomalies Only1",
+      "type": "n8n-nodes-base.filter",
+      "typeVersion": 2,
+      "position": [
+        -15264,
+        9696
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\n  \n  let CANON = [];\n  try {\n    CANON = ($('Build Clinic List').first().json.clinics || []).map(c => c.name).filter(Boolean);\n  } catch (e) { CANON = []; }\n\n  function normName(s) {\n    return String(s || '')\n      .toLowerCase()\n      .replace(/[.,&'/()\\-]/g, ' ')\n      .replace(/\\b(pllc|llc|pc|pa|md|do|np|inc|incorporated|group|the|of|and)\\b/g, ' ')\n      .replace(/\\s+/g, ' ')\n      .trim();\n  }\n  function stem(t) { return t.endsWith('s') && t.length > 3 ? t.slice(0, -1) : t; }\n  function tokenSet(s) { return [...new Set(normName(s).split(' ').filter(Boolean).map(stem))]; }\n  function levRatio(a, b) {\n    if (a === b) return 1;\n    if (!a.length || !b.length) return 0;\n    const m = a.length, n = b.length;\n    const dp = Array.from({ length: m + 1 }, (_, i) => [i, ...new Array(n).fill(0)]);\n    for (let j = 0; j <= n; j++) dp[0][j] = j;\n    for (let i = 1; i <= m; i++)\n      for (let j = 1; j <= n; j++)\n        dp[i][j] = Math.min(dp[i-1][j] + 1, dp[i][j-1] + 1, dp[i-1][j-1] + (a[i-1] === b[j-1] ? 0 : 1));\n    return 1 - dp[m][n] / Math.max(m, n);\n  }\n  function nameScore(a, b) {\n    const A = tokenSet(a), B = tokenSet(b);\n    if (!A.length || !B.length) return 0;\n    const inter = A.filter(t => B.includes(t)).length;\n    const union = new Set([...A, ...B]).size;\n    const jaccard = inter / union;\n    const contain = inter / Math.min(A.length, B.length);\n    const charR   = levRatio([...A].sort().join(' '), [...B].sort().join(' '));\n    return Math.max(jaccard, charR, 0.5 * contain + 0.5 * jaccard);\n  }\n  function canonical(name) {\n    const ACCEPT = 0.72, MARGIN = 0.12;\n    if (!CANON.length) return { name, exact: true };\n    const scored = CANON.map(c => ({ c, s: nameScore(name, c) })).sort((x, y) => y.s - x.s);\n    const best = scored[0], second = scored[1] || { s: 0 };\n    if (best && best.s >= 0.999) return { name: best.c, exact: true };\n    if (best && best.s >= ACCEPT && (best.s - second.s) >= MARGIN) {\n      console.log(`[CLINIC-MATCH] \"${name}\" → \"${best.c}\" (${best.s.toFixed(2)})`);\n      return { name: best.c, exact: false };\n    }\n    console.warn(`[CLINIC-NOMATCH] \"${name}\" kept as-is (best \"${best ? best.c : '-'}\" ${best ? best.s.toFixed(2) : 0})`);\n    return { name, exact: false };\n  }\n\n  const groups = {};\n\n  for (const item of items) {\n    const a = item.json;\n    if (!a.alertType) continue;\n\n    const tier = a.tier === 'CRITICAL' ? 'CRITICAL' : 'NON_CRITICAL';\n    const resolved = canonical(a.clinicName || 'Unknown Clinic');\n    const clinicName = resolved.name;\n    const key = clinicName + '|' + tier;\n\n    if (!groups[key]) {\n      groups[key] = {\n        clinicName,\n        tier,\n        detectedAt:    a.detectedAt || '',\n        providerEmail: a.providerEmail || '',\n        npPhone:       a.npPhone || '',\n        _providerLocked: false,\n        alerts: []\n      };\n    }\n    const g = groups[key];\n\n    if (!g._providerLocked && resolved.exact && a.providerEmail) {\n      g.providerEmail = a.providerEmail;\n      g.npPhone = a.npPhone || g.npPhone;\n      g._providerLocked = true;\n    } else if (!g.providerEmail && a.providerEmail) {\n      g.providerEmail = a.providerEmail;\n      g.npPhone = a.npPhone || g.npPhone;\n    }\n\n    g.alerts.push({\n      patientId:   a.patientId,\n      patientName: a.patientName,\n      alertType:   a.alertType,\n      label:       a.label,\n      value:       a.value,\n      unit:        a.unit,\n      threshold:   a.threshold,\n      tier:        a.tier,\n      deviceType:  a.deviceType,\n      readingId:   a.readingId,\n      timestamp:   a.timestamp\n    });\n  }\n\n  const output = Object.values(groups).map(g => {\n    delete g._providerLocked;\n    return { json: g };\n  });\n\n  return output;\n"
+      },
+      "id": "1c8c47a8-da52-48a7-bdc3-e1d3c581dc1a",
+      "name": "Group Alerts by Clinic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14832,
+        9696
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst output = [];\n\nfor (const input of items) {\n  const data = input.json;\n\n  const headerColor = data.tier === 'CRITICAL' ? '#c0392b' : '#d35400';\n  const accentColor = data.tier === 'CRITICAL' ? '#c0392b' : '#d35400';\n  const actionText = data.tier === 'CRITICAL'\n    ? 'ACTION REQUIRED: Call the patient to repeat the reading, contact the clinic, and text the NP immediately.'\n    : 'ACTION REQUIRED: Please review these readings and follow up with patients as needed.';\n  const uniquePatients = [...new Set(data.alerts.map(a => a.patientId))].length;\n\n  const rows = data.alerts.map((a, i) => {\n    const bg = i % 2 === 0 ? '#ffffff' : '#f8f9fa';\n    const severityColor = a.tier === 'CRITICAL' ? '#c0392b' : '#d35400';\n    const severityBg = a.tier === 'CRITICAL' ? '#fdecea' : '#fef3e2';\n    const severityLabel = a.tier === 'CRITICAL' ? 'CRITICAL' : 'NON-CRITICAL';\n    const time = (a.timestamp || '').replace('T', ' ').substring(0, 16);\n    return `<tr style=\"background:${bg};\"><td style=\"padding:12px 14px;border-top:1px solid #eee;\"><p style=\"margin:0;font-size:13px;font-weight:bold;color:#2c3e50;\">${a.patientName}</p><p style=\"margin:2px 0 0;font-size:11px;color:#aaa;\">ID: ${a.patientId}</p></td><td style=\"padding:12px 14px;border-top:1px solid #eee;font-size:13px;color:#555;\">${a.label}</td><td style=\"padding:12px 14px;border-top:1px solid #eee;text-align:center;\"><span style=\"font-size:15px;font-weight:bold;color:${severityColor};\">${a.value}</span><span style=\"font-size:11px;color:#888;\"> ${a.unit}</span></td><td style=\"padding:12px 14px;border-top:1px solid #eee;font-size:13px;color:#888;text-align:center;\">${a.threshold} ${a.unit}</td><td style=\"padding:12px 14px;border-top:1px solid #eee;text-align:center;\"><span style=\"background:${severityBg};color:${severityColor};padding:3px 10px;border-radius:12px;font-size:11px;font-weight:bold;\">${severityLabel}</span></td><td style=\"padding:12px 14px;border-top:1px solid #eee;font-size:12px;color:#888;\">${time}</td></tr>`;\n  }).join('');\n\n  const html = `<!DOCTYPE html><html><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1.0\"></head><body style=\"margin:0;padding:0;background:#f4f6f9;font-family:Arial,sans-serif;\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f4f6f9;padding:30px 0;\"><tr><td align=\"center\"><table width=\"700\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#ffffff;border-radius:8px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);\"><tr><td style=\"background:${headerColor};padding:28px 32px;\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><td><p style=\"margin:0;color:rgba(255,255,255,0.8);font-size:11px;letter-spacing:1.5px;text-transform:uppercase;\">RPM Monitoring System</p><h1 style=\"margin:8px 0 4px;color:#ffffff;font-size:22px;font-weight:bold;\">${data.tier === 'CRITICAL' ? 'CRITICAL Alert Summary' : 'NON-CRITICAL Alert Summary'}</h1><p style=\"margin:0;color:rgba(255,255,255,0.9);font-size:14px;\">${data.clinicName}</p></td><td align=\"right\" valign=\"top\"><span style=\"background:rgba(255,255,255,0.2);color:#fff;padding:8px 16px;border-radius:20px;font-size:12px;font-weight:bold;white-space:nowrap;\">${data.alerts.length} ALERT${data.alerts.length > 1 ? 'S' : ''}</span></td></tr></table></td></tr><tr><td style=\"background:#f8f9fa;padding:12px 32px;border-bottom:1px solid #eee;\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\"><tr><td style=\"font-size:12px;color:#888;\">Detected at: <strong style=\"color:#2c3e50;\">${data.detectedAt} CST</strong></td><td align=\"right\" style=\"font-size:12px;color:#888;\">${uniquePatients} patient${uniquePatients > 1 ? 's' : ''} affected</td></tr></table></td></tr><tr><td style=\"padding:20px 32px 0;\"><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"background:#f8f9fa;border-left:4px solid ${accentColor};border-radius:4px;\"><tr><td style=\"padding:14px 18px;font-size:13px;color:#2c3e50;line-height:1.5;\"><strong>${data.tier === 'CRITICAL' ? 'CRITICAL — ' : 'NON-CRITICAL — '}</strong>${actionText}</td></tr></table></td></tr><tr><td style=\"padding:24px 32px;\"><p style=\"margin:0 0 12px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px;\">Alert Details</p><table width=\"100%\" cellpadding=\"0\" cellspacing=\"0\" style=\"border:1px solid #eee;border-radius:6px;overflow:hidden;\"><tr style=\"background:#2c3e50;\"><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;\">Patient</td><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;\">Alert</td><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;text-align:center;\">Value</td><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;text-align:center;\">Threshold</td><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;text-align:center;\">Severity</td><td style=\"padding:11px 14px;font-size:11px;color:#fff;font-weight:bold;text-transform:uppercase;letter-spacing:0.5px;\">Reading Time</td></tr>${rows}</table></td></tr><tr><td style=\"background:#f8f9fa;padding:20px 32px;border-top:1px solid #eee;\"><p style=\"margin:0;font-size:11px;color:#aaa;text-align:center;\">This is an automated alert from the RPM Monitoring System. Please do not reply to this email.</p></td></tr></table></td></tr></table></body></html>`;\n\n  output.push({ json: { ...data, emailHtml: html } });\n}\n\nreturn output;"
+      },
+      "id": "4d3dba13-51b0-4225-9cca-3d107110bb1e",
+      "name": "Build HTML",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14608,
+        9696
+      ]
+    },
+    {
+      "parameters": {
+        "fromEmail": "RPM Alerts <contact@rpmcares.com>",
+        "toEmail": "={{ $json.providerEmail.join(', ') }}",
+        "subject": "={{ $json.tier === 'CRITICAL' ? '[CRITICAL]' : '[NON-CRITICAL]' }} RPM Alert — {{ $json.clinicName }} | {{ $json.alerts.length }} Patient{{ $json.alerts.length > 1 ? 's' : '' }} | {{ $now.toFormat('MM/dd/yyyy') }}",
+        "html": "={{ $json.emailHtml }}",
+        "options": {
+          "appendAttribution": false
+        }
+      },
+      "id": "ea6e57ae-8134-4e90-a3d6-fddf733db4ed",
+      "name": "Send Clinic Email1",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        -14384,
+        9696
+      ],
+      "webhookId": "13804143-e81c-4865-95fd-01cc06575508",
+      "credentials": {
+        "smtp": {
+          "id": "6WYnAtoYAWLNnCZU",
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $('Build HTML').all();\nconst rows = [];\n\nfor (const input of items) {\n  const item = input.json;\n  if (!item.alerts) continue;\n\n  for (const a of item.alerts) {\n    rows.push({ json: {\n      clinicName: item.clinicName,\n      tier: item.tier,\n      providerEmail: Array.isArray(item.providerEmail) ? item.providerEmail.join(', ') : item.providerEmail,\n      detectedAt: item.detectedAt,\n      patientId: a.patientId,\n      patientName: a.patientName,\n      label: a.label,\n      value: a.value,\n      unit: a.unit,\n      threshold: a.threshold,\n      deviceType: a.deviceType,\n      readingId: a.readingId, \n      readingTime: a.timestamp,\n      emailStatus: 'SENT', \n      smsStatus: 'N/A' \n    }});\n  }\n}\n\nreturn rows;"
+      },
+      "id": "ef329697-6e7a-4d1e-8264-606f1aaea255",
+      "name": "Flatten Sent Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14160,
+        9600
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $('Build HTML').all();\nconst rows = [];\n\nfor (const input of items) {\n  const item = input.json;\n  if (!item.alerts) continue;\n\n  for (const a of item.alerts) {\n    rows.push({ json: {\n      clinicName: item.clinicName,\n      tier: item.tier,\n      providerEmail: Array.isArray(item.providerEmail) ? item.providerEmail.join(', ') : item.providerEmail,\n      detectedAt: item.detectedAt,\n      patientId: a.patientId,\n      patientName: a.patientName,\n      label: a.label,\n      value: a.value,\n      unit: a.unit,\n      threshold: a.threshold,\n      deviceType: a.deviceType,\n      readingId: a.readingId,\n      readingTime: a.timestamp,\n      emailStatus: 'FAILED',\n      smsStatus: 'N/A' \n    }});\n  }\n}\n\nreturn rows;"
+      },
+      "id": "aa17dd0b-8458-4774-9788-aca09befc18d",
+      "name": "Flatten Failed Rows",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14160,
+        9792
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "AuditLog",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "patient_id": "={{ $json.patientId }}",
+            "patient_name": "={{ $json.patientName }}",
+            "clinic_name": "={{ $json.clinicName }}",
+            "alert_type": "={{ $json.label }}",
+            "tier": "={{ $json.tier }}",
+            "value": "={{ $json.value }}",
+            "unit": "={{ $json.unit }}",
+            "threshold": "={{ $json.threshold }}",
+            "device_type": "={{ $json.deviceType }}",
+            "reading_id": "={{ $json.readingId }}",
+            "reading_time": "={{ $json.readingTime }}",
+            "provider_email": "={{ $json.providerEmail }}",
+            "sms_sent": "={{ $json.smsStatus }}",
+            "email_sent": "={{ $json.emailStatus }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_id",
+              "displayName": "patient_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_name",
+              "displayName": "patient_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clinic_name",
+              "displayName": "clinic_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "alert_type",
+              "displayName": "alert_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tier",
+              "displayName": "tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "value",
+              "displayName": "value",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "unit",
+              "displayName": "unit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "threshold",
+              "displayName": "threshold",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "device_type",
+              "displayName": "device_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reading_id",
+              "displayName": "reading_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reading_time",
+              "displayName": "reading_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider_email",
+              "displayName": "provider_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sms_sent",
+              "displayName": "sms_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "email_sent",
+              "displayName": "email_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "66ce079b-53e7-4a2f-bd60-e94a2f1bd580",
+      "name": "Log Sent1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -13936,
+        9600
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "AuditLog",
+          "mode": "name"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "patient_id": "={{ $json.patientId }}",
+            "patient_name": "={{ $json.patientName }}",
+            "clinic_name": "={{ $json.clinicName }}",
+            "alert_type": "={{ $json.label }}",
+            "tier": "={{ $json.tier }}",
+            "value": "={{ $json.value }}",
+            "unit": "={{ $json.unit }}",
+            "threshold": "={{ $json.threshold }}",
+            "device_type": "={{ $json.deviceType }}",
+            "reading_id": "={{ $json.readingId }}",
+            "reading_time": "={{ $json.readingTime }}",
+            "provider_email": "={{ $json.providerEmail }}",
+            "sms_sent": "={{ $json.smsStatus }}",
+            "email_sent": "={{ $json.emailStatus }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_id",
+              "displayName": "patient_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_name",
+              "displayName": "patient_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clinic_name",
+              "displayName": "clinic_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "alert_type",
+              "displayName": "alert_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "tier",
+              "displayName": "tier",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "value",
+              "displayName": "value",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "unit",
+              "displayName": "unit",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "threshold",
+              "displayName": "threshold",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "device_type",
+              "displayName": "device_type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reading_id",
+              "displayName": "reading_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "reading_time",
+              "displayName": "reading_time",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "provider_email",
+              "displayName": "provider_email",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "sms_sent",
+              "displayName": "sms_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "email_sent",
+              "displayName": "email_sent",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "72e69c54-4dd6-4a74-b087-87452b3b4f29",
+      "name": "Log Failed1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -13936,
+        9792
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 8 * * *"
+            }
+          ]
+        }
+      },
+      "id": "736fcdf7-fad3-44bb-8510-b84dad0954a7",
+      "name": "Schedule Trigger1",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -18176,
+        9872
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": " const TENOVI_USERNAME = 'hyousif@rpmcares.com';\n  const TENOVI_PASSWORD = 'Storm@123';\n  const TOTP_SECRET     = 'EFTW5B2MWJSAV4Z3ZL2DVEYPUWQLU4VV';\n\n  function sha1(msgBytes) {\n    let h0=0x67452301,h1=0xEFCDAB89,h2=0x98BADCFE,h3=0x10325476,h4=0xC3D2E1F0;\n    const msg=[...msgBytes];\n    const origLen=msg.length;\n    msg.push(0x80);\n    while((msg.length%64)!==56) msg.push(0);\n    const bits=origLen*8;\n    for(let i=7;i>=0;i--) msg.push(Math.floor(bits/Math.pow(256,i))&0xff);\n    for(let i=0;i<msg.length;i+=64){\n      const w=[];\n      for(let j=0;j<16;j++)\n  w[j]=(msg[i+j*4]<<24)|(msg[i+j*4+1]<<16)|(msg[i+j*4+2]<<8)|msg[i+j*4+3];\n      for(let j=16;j<80;j++){const\n  n=w[j-3]^w[j-8]^w[j-14]^w[j-16];w[j]=(n<<1)|(n>>>31);}\n      let a=h0,b=h1,c=h2,d=h3,e=h4;\n      for(let j=0;j<80;j++){\n        let f,k;\n        if(j<20){f=(b&c)|((~b)&d);k=0x5A827999;}\n        else if(j<40){f=b^c^d;k=0x6ED9EBA1;}\n        else if(j<60){f=(b&c)|(b&d)|(c&d);k=0x8F1BBCDC;}\n        else{f=b^c^d;k=0xCA62C1D6;}\n        const tmp=(((a<<5)|(a>>>27))+f+e+k+w[j])>>>0;\n        e=d;d=c;c=(b<<30)|(b>>>2);b=a;a=tmp;\n      }\n      h0=(h0+a)>>>0;h1=(h1+b)>>>0;h2=(h2+c)>>>0;h3=(h3+d)>>>0;h4=(h4+e)>>>0;\n    }\n    const result=[];\n    for(const h of[h0,h1,h2,h3,h4]) for(let i=3;i>=0;i--) result.push((h>>(i*8))&0xff);\n    return result;\n  }\n\n  function hmacSha1(keyBytes, msgBytes) {\n    const BLOCK=64;\n    let k=[...keyBytes];\n    if(k.length>BLOCK) k=sha1(k);\n    while(k.length<BLOCK) k.push(0);\n    const ipad=k.map(b=>b^0x36);\n    const opad=k.map(b=>b^0x5c);\n    return sha1([...opad,...sha1([...ipad,...msgBytes])]);\n  }\n\n  function base32Decode(s) {\n    const alpha='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';\n    let bits='';\n    for(const c of s.replace(/=+$/,'').toUpperCase()){\n      const v=alpha.indexOf(c);\n      if(v!==-1) bits+=v.toString(2).padStart(5,'0');\n    }\n    const bytes=[];\n    for(let i=0;i+8<=bits.length;i+=8) bytes.push(parseInt(bits.slice(i,i+8),2));\n    return bytes;\n  }\n\n  function computeTOTP(secret) {\n    const key=base32Decode(secret);\n    const counter=Math.floor(Date.now()/1000/30);\n    const msg=[0,0,0,0,\n      (counter>>>24)&0xff,(counter>>>16)&0xff,\n      (counter>>>8)&0xff, counter&0xff];\n    const h=hmacSha1(key,msg);\n    const offset=h[h.length-1]&0xf;\n    const\n  code=((h[offset]&0x7f)<<24|h[offset+1]<<16|h[offset+2]<<8|h[offset+3])%1000000;\n    return code.toString().padStart(6,'0');\n  }\n  \n  function uuidv4() {\n    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{\n      const r=Math.random()*16|0;\n      return(c==='x'?r:(r&0x3|0x8)).toString(16);\n    });\n  }\n\n  console.log('[Tenovi Login] Computing OTP...');\n  const otp = computeTOTP(TOTP_SECRET);\n  console.log(`[Tenovi Login] OTP: ${otp}`);\n\n  const resp = await this.helpers.httpRequest({\n    method: 'POST',\n    url: 'https://api2.tenovi.com/auth/',\n    headers: { 'Content-Type': 'application/json', 'Origin': 'https://app.tenovi.com' },\n    body: JSON.stringify({\n      username: TENOVI_USERNAME,\n      password: TENOVI_PASSWORD,\n      otp,\n      otp_method: 'A',\n      session_cookie: uuidv4()\n    })\n  });\n  \n  const data = typeof resp === 'string' ? JSON.parse(resp) : resp;\n  if (!data.token) throw new Error(`Tenovi login failed: ${JSON.stringify(data)}`);\n\n  console.log('[Tenovi Login] Success.');\n  return [{ json: { tenoviToken: data.token } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16784,
+        10032
+      ],
+      "id": "779f6ae9-55ab-42c8-a149-d74459980fba",
+      "name": "Tenovi Login"
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "64c81b75-5ebc-4503-9cfd-fabfc9210c2e",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "SMS",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "SMS"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "5cbc2e78-48af-44ff-b945-68ce13ca8460",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "VOICE",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "VOICE"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "b042ebe2-e652-46f4-a624-095da5d1b666",
+                    "leftValue": "={{ $json.action }}",
+                    "rightValue": "NO_CONTACT",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "NO_CONTACT"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "fea6a56a-0ae5-4b5d-8a82-99e2afc3ec42",
+      "name": "Switch Reminder Action",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -15280,
+        9952
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const CLINICS = $('Build Clinic List').first().json.clinics || [];\nconst allPatients = [];\nfunction normalizePhone(raw) {\n  if (!raw) return null;\n  const digits = String(raw).replace(/\\D/g, '');\n  if (digits.length === 10) return `+1${digits}`;\n  if (digits.length === 11 && digits[0] === '1') return `+${digits}`;\n  return digits.length > 0 ? `+${digits}` : raw;\n}\n\nfor (const clinic of CLINICS) {\n  try {\n    let page = 1, hasMore = true, activeCount = 0, totalCount = 0;\n    console.log(`[DEBUG] [SmartMeter] Fetching patients for clinic: ${clinic.name}`);\n    while (hasMore) {\n      const resp = await this.helpers.httpRequest({\n        method: 'GET',\n        url: `https://api.smartmeterrpm.com/api/patients?page=${page}&size=100`,\n        headers: { 'x-api-key': clinic.key, 'x-api-secret': clinic.secret }\n      });\n      const parsed = typeof resp === 'string' ? JSON.parse(resp) : resp;\n      const patients = parsed.data || [];\n      totalCount += patients.length;\n      for (const p of patients) {\n        const st = String(p.status || '').toUpperCase().trim();\n        if (!globalThis.__noPhoneShown && (st==='ACTIVE'||st==='ENROLLED') && !(p.mobile_phone||p.cell_phone||p.cellphone||p.phone||p.home_phone||p.phone_number||p.contact_number||p.contact_phone)) { globalThis.__noPhoneShown = true; console.log('[DIAG] no-phone patient fields:', JSON.stringify(Object.keys(p))); }\n        if (st === 'ACTIVE' || st === 'ENROLLED') {\n          activeCount++;\n          allPatients.push({\n            patientId: String(p.patient_id), patientName: p.display_name,\n            groupName: clinic.name, phone: normalizePhone(p.mobile_phone || p.cell_phone || p.cellphone || p.phone || p.home_phone || p.phone_number || p.contact_number || p.contact_phone),\n            status: st, __source: 'smartmeter'\n          });\n        }\n      }\n      if (patients.length < 100) hasMore = false; else page++;\n    }\n    console.log(`[DEBUG] [SmartMeter] Clinic ${clinic.name}: Kept ${activeCount} active of ${totalCount}.`);\n  } catch (e) {\n    console.error(`[ERROR] [SmartMeter] patients ${clinic.name}:`, e.message);\n  }\n}\nconsole.log(`[DEBUG] [SmartMeter] Total patients: ${allPatients.length}`);\nreturn allPatients.length ? allPatients.map(p => ({ json: p })) : [{ json: { __empty: true, __source: 'smartmeter', notes: 'No SmartMeter patients' } }];"
+      },
+      "id": "eaadcc1a-903a-4fd7-a6a4-496c423d62b3",
+      "name": "SmartMeter Patients",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16624,
+        9760
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const TENOVI_BASE = 'https://api2.tenovi.com/clients/rpmcares';\nconst allPatients = [];\nfunction normalizePhone(raw) {\n  if (!raw) return null;\n  const digits = String(raw).replace(/\\D/g, '');\n  if (digits.length === 10) return `+1${digits}`;\n  if (digits.length === 11 && digits[0] === '1') return `+${digits}`;\n  return digits.length > 0 ? `+${digits}` : raw;\n}\n\ntry {\n  const TOKEN = $('Tenovi Login').first().json.tenoviToken;\n  if (!TOKEN) throw new Error('No token from Tenovi Login node');\n  const authHeaders = { 'Authorization': `Token ${TOKEN}`, 'Accept': 'application/json' };\n\n  const facResp = await this.helpers.httpRequest({ method: 'GET', url: `${TENOVI_BASE}/facilities/`, headers: authHeaders });\n  const facData = typeof facResp === 'string' ? JSON.parse(facResp) : facResp;\n  const facilities = facData.results || facData || [];\n  console.log(`[DEBUG] [Tenovi] Found ${facilities.length} facilities.`);\n\n  let tenoviCount = 0;\n  for (const facility of facilities) {\n    try {\n      let page = 1, hasMore = true;\n      while (hasMore) {\n        const pResp = await this.helpers.httpRequest({\n          method: 'GET',\n          url: `${TENOVI_BASE}/rpm/facilities/${facility.id}/patients/?status=AC&page_size=500&page=${page}`,\n          headers: authHeaders\n        });\n        const pData = typeof pResp === 'string' ? JSON.parse(pResp) : pResp;\n        const patients = pData.results || pData.data || [];\n        for (const p of patients) {\n          const pat = p.patient || p;\n          const rawModules = p.modules || pat.modules || [];\n          const modulesArr = Array.isArray(rawModules) ? rawModules.map(String) : [String(rawModules)].filter(Boolean);\n          const modulesStr = modulesArr.length ? modulesArr.join('+') : 'RPM';\n          tenoviCount++;\n          allPatients.push({\n            patientId: String(pat.id || pat.external_id || ''), patientName: pat.name || '',\n            groupName: facility.name, phone: normalizePhone(pat.phone_number || pat.phone || pat.mobile_phone || pat.cell_phone || pat.home_phone || pat.contact_number),\n            status: 'ACTIVE', __source: 'tenovi', modules: modulesStr\n          });\n        }\n        if (!pData.next) hasMore = false; else page++;\n      }\n    } catch (fe) {\n      console.error(`[ERROR] [Tenovi] Facility \"${facility.name}\":`, fe.message);\n    }\n  }\n  console.log(`[DEBUG] [Tenovi] Total patients: ${tenoviCount}`);\n} catch (e) {\n  console.error('[ERROR] [Tenovi] patients block failed:', e.message);\n}\nreturn allPatients.length ? allPatients.map(p => ({ json: p })) : [{ json: { __empty: true, __source: 'tenovi', notes: 'No Tenovi patients' } }];"
+      },
+      "id": "4fe54a02-2865-4fa4-a336-92db169960dd",
+      "name": "Tenovi Patients",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16624,
+        10032
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "7420b716-a009-44ef-b227-bca3001672c2",
+      "name": "Merge Patients",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -16384,
+        9872
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const CLINICS = $('Build Clinic List').first().json.clinics || [];\nconst lookbackMs = 60 * 60 * 1000 * 264;\nconst dateStart  = new Date(Date.now() - lookbackMs).toISOString().substring(0, 19);\nconst dateEnd    = new Date().toISOString().substring(0, 19);\nconst allRecords = [];\nconst errors     = [];\n\nfor (const clinic of CLINICS) {\n  try {\n    let page = 1, hasMore = true, totalFetched = 0;\n    console.log(`[DEBUG] [SmartMeter] Fetching readings for clinic: ${clinic.name}`);\n    while (hasMore) {\n      const bodyStr = JSON.stringify({ ingest_date_start: dateStart, ingest_date_end: dateEnd, reading_type: ['blood_glucose', 'blood_pressure'] });\n      const r = await this.helpers.httpRequest({\n        method: 'POST',\n        url: `https://api.smartmeterrpm.com/api/readings?page=${page}`,\n        headers: { 'Content-Type': 'application/json', 'x-api-key': clinic.key, 'x-api-secret': clinic.secret },\n        body: bodyStr\n      });\n      const parsed = typeof r === 'string' ? JSON.parse(r) : r;\n      const readings = parsed.data || [];\n      totalFetched += readings.length;\n      for (const rd of readings) {\n        allRecords.push({ ...rd, patient_id: rd.patient_id, systolic: rd.systolic_mmhg, __clinicName: clinic.name, __source: 'smartmeter' });\n      }\n      if (readings.length < 50 || page >= 10) hasMore = false; else page++;\n    }\n    console.log(`[DEBUG] [SmartMeter] Clinic ${clinic.name} total readings: ${totalFetched}`);\n  } catch (e) {\n    console.error(`[ERROR] [SmartMeter] readings ${clinic.name}:`, e.message);\n    errors.push({ source: 'smartmeter', clinic: clinic.name, error: e.message });\n  }\n}\nconsole.log(`[DEBUG] [SmartMeter] Total readings: ${allRecords.length}`);\nreturn allRecords.length ? allRecords.map(r => ({ json: r })) : [{ json: { __empty: true, __source: 'smartmeter', notes: 'No SmartMeter readings', errors } }];"
+      },
+      "id": "fce0359c-4447-4f21-aacd-8661e4d7314f",
+      "name": "SmartMeter Readings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16160,
+        9968
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const lookbackMs = 60 * 60 * 1000 * 264;\nconst dateStart  = new Date(Date.now() - lookbackMs).toISOString().substring(0, 19);\nconst dateEnd    = new Date().toISOString().substring(0, 19);\nconst allRecords = [];\nconst errors     = [];\n\nconst TENOVI_BASE        = 'https://api2.tenovi.com/clients/rpmcares';\nconst TENOVI_CONCURRENCY = 10;\nconst REQ_TIMEOUT_MS     = 20000;\nconst MAX_RETRIES        = 3;\nconst helpers = this.helpers;\nconst sleep   = ms => new Promise(r => setTimeout(r, ms));\n\ntry {\n  const TOKEN = $('Tenovi Login').first().json.tenoviToken;\n  if (!TOKEN) throw new Error('No token from Tenovi Login node');\n  const authHeaders = { 'Authorization': `Token ${TOKEN}`, 'Accept': 'application/json' };\n\n  const tenoviPatients = $('Tenovi Patients').all().map(it => it.json).filter(p => p && p.__source === 'tenovi' && p.patientId);\n  console.log(`[DEBUG] [Tenovi] Fetching readings for ${tenoviPatients.length} patients (concurrency=${TENOVI_CONCURRENCY})`);\n\n  const httpGet = async (url) => {\n    let lastErr;\n    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {\n      try {\n        return await helpers.httpRequest({ method: 'GET', url, headers: authHeaders, timeout: REQ_TIMEOUT_MS });\n      } catch (e) {\n        lastErr = e;\n        const c = e.statusCode || e.httpCode || (e.response && e.response.statusCode);\n        const retryable = !c || c === 429 || c >= 500;\n        if (!retryable) break;\n        await sleep(400 * Math.pow(2, attempt) + Math.random() * 200);\n      }\n    }\n    throw lastErr;\n  };\n\n  const fetchPatient = async (patient) => {\n    const recs = [];\n    let pillboxLatest = null;\n    let url = `${TENOVI_BASE}/data/patients/${encodeURIComponent(patient.patientId)}/measurements/` +\n      `?timestamp__gte=${encodeURIComponent(dateStart)}` +\n      `&timestamp__lt=${encodeURIComponent(dateEnd)}` +\n      `&page_size=100`;\n    let guard = 0;\n    while (url && guard++ < 50) {\n      const resp  = await httpGet(url);\n      const pData = typeof resp === 'string' ? JSON.parse(resp) : resp;\n      for (const m of (pData.results || [])) {\n        const name = m.measurement_metric?.name || '';\n        const v1 = parseFloat(m.value), v2 = parseFloat(m.secondary_value);\n        const nativeId  = m.id || m.measurement_id || m.uuid;\n        const readingId = nativeId ? `tenovi_${nativeId}` : `tenovi_${patient.patientId}_${m.timestamp}_${name}`;\n        const base = {\n          patient_id: patient.patientId, patientId: patient.patientId,\n          timestamp: m.timestamp, date_recorded: m.timestamp,\n          reading_id: readingId, __clinicName: patient.groupName || '', __source: 'tenovi'\n        };\n        if (name === 'blood_pressure') {\n          recs.push({ ...base, device_type: 'blood_pressure', reading_type: 'blood_pressure',\n            systolic: isNaN(v1) ? null : v1, systolic_mmhg: isNaN(v1) ? null : v1,\n            diastolic: isNaN(v2) ? null : v2, diastolic_mmhg: isNaN(v2) ? null : v2 });\n        } else if (name === 'glucose') {\n          recs.push({ ...base, device_type: 'blood_glucose', reading_type: 'blood_glucose',\n            measurement_type: 'RBS', glucose: isNaN(v1) ? null : v1, blood_glucose_mgdl: isNaN(v1) ? null : v1, before_meal: false });\n        } else if (name === 'pillbox_opened') {\n          if (!pillboxLatest || new Date(m.timestamp) > new Date(pillboxLatest)) pillboxLatest = m.timestamp;\n        }\n      }\n      url = pData.next || null;\n    }\n    if (pillboxLatest) {\n      recs.push({ patient_id: patient.patientId, patientId: patient.patientId,\n        timestamp: pillboxLatest, date_recorded: pillboxLatest,\n        reading_id: `tenovi_rtm_${patient.patientId}_${pillboxLatest}`,\n        __clinicName: patient.groupName || '', __source: 'tenovi',\n        device_type: 'rtm_activity', reading_type: 'rtm_activity' });\n    }\n    return recs;\n  };\n\n  let cursor = 0, tenoviVitals = 0, tenoviRtm = 0, tenoviErrors = 0;\n  const runners = new Array(Math.min(TENOVI_CONCURRENCY, tenoviPatients.length)).fill(0).map(async () => {\n    while (cursor < tenoviPatients.length) {\n      const patient = tenoviPatients[cursor++];\n      try {\n        const list = await fetchPatient(patient);\n        for (const rec of list) { allRecords.push(rec); if (rec.device_type === 'rtm_activity') tenoviRtm++; else tenoviVitals++; }\n      } catch (e) {\n        tenoviErrors++;\n        console.error(`[ERROR] [Tenovi] patient=${patient.patientId}:`, e.message);\n      }\n    }\n  });\n  await Promise.all(runners);\n  console.log(`[DEBUG] [Tenovi] Total: ${tenoviVitals} vitals, ${tenoviRtm} RTM-activity, ${tenoviErrors} errors`);\n} catch (e) {\n  console.error('[ERROR] [Tenovi] readings block failed:', e.message);\n  errors.push({ source: 'tenovi', error: e.message });\n}\nconsole.log(`[DEBUG] [Tenovi] Total readings: ${allRecords.length}`);\nreturn allRecords.length ? allRecords.map(r => ({ json: r })) : [{ json: { __empty: true, __source: 'tenovi', notes: 'No Tenovi readings', errors } }];"
+      },
+      "id": "83e1b19b-fb25-44f9-965e-a01fc9bdf800",
+      "name": "Tenovi Readings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -16160,
+        9776
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "8577346d-cb63-4d36-abaa-bd5eb104741c",
+      "name": "Merge Readings",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        -15936,
+        9872
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 144888106,
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "patient_id": "={{ $json.patient_id }}",
+            "patient_name": "={{ $json.patient_name }}",
+            "type": "={{ $json.type }}",
+            "days_missing": "={{ $json.days_missing }}",
+            "patient_phone": "={{ $json.patient_phone }}",
+            "clinic_name": "={{ $json.clinic_name }}",
+            "status": "={{ $json.status }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_phone",
+              "displayName": "patient_phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "patient_id",
+              "displayName": "patient_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_name",
+              "displayName": "patient_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clinic_name",
+              "displayName": "clinic_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "days_missing",
+              "displayName": "days_missing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "26237b03-7e40-4b88-ac90-1ba319120d32",
+      "name": "Log Reminder (SMS Failed)",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -14400,
+        10240
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\nconst items = $input.all();\nconst previousItems = $('Switch Reminder Action').all();\n\nfor (let i = 0; i < items.length; i++) {\n    const originalData = previousItems[i] ? previousItems[i].json : {};\n    \n    results.push({\n        json: {\n            timestamp: new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }),\n            patient_id: originalData.patientId || \"\",\n            patient_name: originalData.patientName || \"\",\n            type: originalData.actionType || \"\",\n            days_missing: (originalData.daysMissing !== undefined && originalData.daysMissing !== null) ? originalData.daysMissing : \"\",\n            status: \"SMS_SENT\",\n            patient_phone: originalData.patientPhone || \"\",\n            clinic_name: originalData.clinicName || \"\"\n        }\n    });\n}\n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14624,
+        10064
+      ],
+      "id": "2620d58a-b37f-41b0-9e1e-26d3b0db07ab",
+      "name": "Code in JavaScript"
+    },
+    {
+      "parameters": {
+        "jsCode": "const results = [];\nconst items = $input.all();\nconst previousItems = $('Switch Reminder Action').all();\n\nfor (let i = 0; i < items.length; i++) {\n    const originalData = previousItems[i] ? previousItems[i].json : {};\n    \n    let errorReason = \"SMS_FAILED\";\n    if (items[i].json.error) {\n        if (typeof items[i].json.error === 'string') {\n            errorReason = items[i].json.error;\n        } else if (items[i].json.error.message) {\n            errorReason = items[i].json.error.message;\n        }\n    }\n    \n    results.push({\n        json: {\n            timestamp: new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }),\n            patient_id: (originalData.patientId !== undefined) ? originalData.patientId : \"\",\n            patient_name: (originalData.patientName !== undefined) ? originalData.patientName : \"\",\n            type: (originalData.actionType !== undefined) ? originalData.actionType : \"\",\n            days_missing: (originalData.daysMissing !== undefined && originalData.daysMissing !== null) ? originalData.daysMissing : \"\",\n            status: errorReason,\n            patient_phone: (originalData.patientPhone !== undefined) ? originalData.patientPhone : \"\",\n            clinic_name: (originalData.clinicName !== undefined) ? originalData.clinicName : \"\"\n        }\n    });\n} \n\nreturn results;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14624,
+        10224
+      ],
+      "id": "5aec3455-6309-46f6-be3e-3dd835fbe7ae",
+      "name": "Code in JavaScript1"
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc",
+          "mode": "list",
+          "cachedResultName": "AuditLog",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1IeuerDL-vbSwt3JWOkh_pSrZUM8UeCztwU5sL4D2isc/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 144888106,
+          "mode": "list"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamp": "={{ $now.toFormat('MM/dd/yyyy') }}",
+            "patient_id": "={{ $json.patientId }}",
+            "patient_name": "={{ $json.patientName }}",
+            "type": "={{ $json.actionType }}",
+            "days_missing": "={{ $json.daysMissing }}",
+            "status": "={{ $json.logStatus }}",
+            "patient_phone": "={{ $json.patientPhone }}",
+            "clinic_name": "={{ $json.clinicName }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {
+              "id": "timestamp",
+              "displayName": "timestamp",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_phone",
+              "displayName": "patient_phone",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "patient_id",
+              "displayName": "patient_id",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "patient_name",
+              "displayName": "patient_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "clinic_name",
+              "displayName": "clinic_name",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            },
+            {
+              "id": "type",
+              "displayName": "type",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "days_missing",
+              "displayName": "days_missing",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            },
+            {
+              "id": "status",
+              "displayName": "status",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "ecc581c9-9542-4dac-898f-66f25e475801",
+      "name": "Log Reminder1",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4,
+      "position": [
+        -14768,
+        9888
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "h669mF3dVytPo3sa",
+          "name": "Google Sheets account 4"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Send Reminder SMS": {
+      "main": [
+        [
+          {
+            "node": "Code in JavaScript",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code in JavaScript1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Thresholds & Contacts": {
+      "main": [
+        [
+          {
+            "node": "Build Threshold Map",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Clinic Credentials": {
+      "main": [
+        [
+          {
+            "node": "Build Clinic List",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Threshold Map": {
+      "main": [
+        [
+          {
+            "node": "Merge Setup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Clinic List": {
+      "main": [
+        [
+          {
+            "node": "Merge Setup",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Setup": {
+      "main": [
+        [
+          {
+            "node": "Load Today's Alert IDs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Today's Alert IDs": {
+      "main": [
+        [
+          {
+            "node": "Load Reminder History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Reminder History": {
+      "main": [
+        [
+          {
+            "node": "SmartMeter Patients",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tenovi Login",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Enrich Data": {
+      "main": [
+        [
+          {
+            "node": "Check Missing Readings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Detect Anomalies1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Missing Readings": {
+      "main": [
+        [
+          {
+            "node": "Switch Reminder Action",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Detect Anomalies1": {
+      "main": [
+        [
+          {
+            "node": "Filter — Anomalies Only1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Filter — Anomalies Only1": {
+      "main": [
+        [
+          {
+            "node": "Group Alerts by Clinic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Group Alerts by Clinic": {
+      "main": [
+        [
+          {
+            "node": "Build HTML",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HTML": {
+      "main": [
+        [
+          {
+            "node": "Send Clinic Email1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Clinic Email1": {
+      "main": [
+        [
+          {
+            "node": "Flatten Sent Rows",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Flatten Failed Rows",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Sent Rows": {
+      "main": [
+        [
+          {
+            "node": "Log Sent1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Flatten Failed Rows": {
+      "main": [
+        [
+          {
+            "node": "Log Failed1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Schedule Trigger1": {
+      "main": [
+        [
+          {
+            "node": "Load Thresholds & Contacts",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Load Clinic Credentials",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tenovi Login": {
+      "main": [
+        [
+          {
+            "node": "Tenovi Patients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch Reminder Action": {
+      "main": [
+        [
+          {
+            "node": "Send Reminder SMS",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Reminder1",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log Reminder1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SmartMeter Patients": {
+      "main": [
+        [
+          {
+            "node": "Merge Patients",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tenovi Patients": {
+      "main": [
+        [
+          {
+            "node": "Merge Patients",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Patients": {
+      "main": [
+        [
+          {
+            "node": "SmartMeter Readings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Tenovi Readings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SmartMeter Readings": {
+      "main": [
+        [
+          {
+            "node": "Merge Readings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Tenovi Readings": {
+      "main": [
+        [
+          {
+            "node": "Merge Readings",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Merge Readings": {
+      "main": [
+        [
+          {
+            "node": "Enrich Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript": {
+      "main": [
+        [
+          {
+            "node": "Log Reminder",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code in JavaScript1": {
+      "main": [
+        [
+          {
+            "node": "Log Reminder (SMS Failed)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "01c0da12836e72542d84a00078134effe656f4c9be9858e43086a3ec9b271724"
+  }
+}

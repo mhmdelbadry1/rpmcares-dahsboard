@@ -8,7 +8,22 @@ import { AnimatedSplashOverlay } from "@/components/animated-icon";
 import { AppDrawerContent } from "@/components/drawer-content";
 import { LoginScreen } from "@/components/login-screen";
 import { AuthProvider, useAuth } from "@/contexts/auth-context";
+import { UnreadProvider, useUnread } from "@/contexts/unread-context";
 import { useTheme } from "@/hooks/use-theme";
+
+function CommHeaderTitle() {
+  const { total } = useUnread();
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+      <Text style={{ fontWeight: "700", fontSize: 16, color: "#ffffff" }}>Messages & Calls</Text>
+      {total > 0 && (
+        <View style={{ backgroundColor: "rgba(255,255,255,0.25)", borderRadius: 10, minWidth: 20, height: 20, alignItems: "center", justifyContent: "center", paddingHorizontal: 5 }}>
+          <Text style={{ color: "#fff", fontSize: 11, fontWeight: "700" }}>{total > 99 ? "99+" : total}</Text>
+        </View>
+      )}
+    </View>
+  );
+}
 
 function DrawerNav() {
   const colors = useTheme();
@@ -27,7 +42,14 @@ function DrawerNav() {
       <Drawer.Screen name="index" options={{ title: "Command Center" }} />
       <Drawer.Screen name="patients" options={{ title: "Patient Registry", headerShown: false }} />
       <Drawer.Screen name="alerts" options={{ title: "Alerts & Triage" }} />
-      <Drawer.Screen name="communications" options={{ title: "Communications" }} />
+      <Drawer.Screen
+        name="communications"
+        options={{
+          headerTitle: () => <CommHeaderTitle />,
+          headerStyle: { backgroundColor: "#1e40af" },
+          headerTintColor: "#ffffff",
+        }}
+      />
       <Drawer.Screen name="billing" options={{ title: "Billing & Compliance" }} />
       <Drawer.Screen name="workflows" options={{ title: "Workflows" }} />
       <Drawer.Screen name="devices" options={{ title: "Devices", headerShown: false }} />
@@ -89,8 +111,10 @@ export default function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <ThemeProvider value={DefaultTheme}>
         <AuthProvider>
-          <AnimatedSplashOverlay />
-          <AuthGate />
+          <UnreadProvider>
+            <AnimatedSplashOverlay />
+            <AuthGate />
+          </UnreadProvider>
         </AuthProvider>
       </ThemeProvider>
     </GestureHandlerRootView>

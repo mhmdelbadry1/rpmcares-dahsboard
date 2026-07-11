@@ -30,6 +30,16 @@ const envSchema = z.object({
   RESEND_API_KEY: z.string().optional(),
   INVITE_FROM_EMAIL: z.string().email().optional(),
   INVITE_FROM_NAME: z.string().default("RPMCares"),
+  // Twilio (SMS + browser voice calling)
+  TWILIO_ACCOUNT_SID: z.string().optional(),
+  TWILIO_AUTH_TOKEN: z.string().optional(),
+  TWILIO_API_KEY: z.string().optional(),   // API Key SID (for Access Token)
+  TWILIO_API_SECRET: z.string().optional(), // API Key Secret (for Access Token)
+  TWILIO_TWIML_APP_SID: z.string().optional(),
+  TWILIO_FROM_NUMBER: z.string().optional(),
+  // Publicly reachable URL for Twilio callbacks (ngrok in dev, real domain in prod).
+  // Falls back to APP_BASE_URL if not set.
+  PUBLIC_URL: z.string().url().optional(),
 });
 
 export const env = envSchema.parse(process.env);

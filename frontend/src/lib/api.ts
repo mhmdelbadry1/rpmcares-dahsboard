@@ -380,8 +380,19 @@ export type CommLog = {
   direction: string;
   duration_seconds: number | null;
   summary: string | null;
+  transcript: string | null;
+  twilio_sid: string | null;
   occurred_at: string;
   created_at: string;
+};
+
+export type CommSummary = {
+  unread: number;
+  lastAt: string;
+  lastSummary: string | null;
+  lastCommType: string;
+  hasCall: boolean;
+  hasSms: boolean;
 };
 
 // ── Device types ───────────────────────────────────────────────────────────
@@ -866,7 +877,18 @@ export const api = {
   createCommunication: (token: string, log: {
     patient_id: string; comm_type?: string; direction?: string;
     duration_seconds?: number; summary?: string; occurred_at?: string; program?: string;
+    twilio_sid?: string;
   }) => request<{ log: CommLog }>('/api/communications', { method: 'POST', body: JSON.stringify(log) }, token),
+  getVoiceToken: (token: string) =>
+    request<{ token: string }>('/api/communications/token', { method: 'GET' }, token),
+  getInboundToken: (token: string) =>
+    request<{ token: string }>('/api/communications/inbound-token', { method: 'GET' }, token),
+  sendSms: (token: string, payload: { patient_id: string; to: string; body: string; clinic_id?: string }) =>
+    request<{ ok: boolean; sid: string; log: CommLog | null }>('/api/communications/sms', { method: 'POST', body: JSON.stringify(payload) }, token),
+  markCommRead: (token: string, patientId: string) =>
+    request<{ ok: boolean }>('/api/communications/mark-read', { method: 'POST', body: JSON.stringify({ patient_id: patientId }) }, token),
+  getUnreadCounts: (token: string) =>
+    request<{ counts: Record<string, CommSummary> }>('/api/communications/unread', { method: 'GET' }, token),
 
   // ── Devices ────────────────────────────────────────────────────────────────
   listDevices: (token: string) =>

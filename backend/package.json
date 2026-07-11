@@ -13,7 +13,8 @@
     "seed:clinics": "tsx src/scripts/seed-clinics.ts",
     "make:superadmin": "tsx src/scripts/make-superadmin.ts",
     "test:isolation": "tsx tests/dashboard-isolation.ts",
-    "test:aggregation": "tsx tests/smartmeter-aggregation.ts"
+    "test:aggregation": "tsx tests/smartmeter-aggregation.ts",
+    "sync:twilio": "tsx src/scripts/sync_twilio_history.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.47.10",
@@ -23,6 +24,7 @@
     "express-async-errors": "^3.1.1",
     "express-rate-limit": "^8.5.2",
     "node-cron": "^4.5.0",
+    "twilio": "^6.0.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {

@@ -93,19 +93,21 @@ async function syncPatients(clinics: ClinicRow[]): Promise<void> {
         const module   = en.patient.devices?.[0]?.module ?? "RPM";
         const diagnoses = en.health_condition ? [en.health_condition] : [];
         const enrollmentStatus = TENOVI_STATUS_MAP[en.status] ?? "inactive";
-        rows.push({
+        const phoneValue = en.patient.phone_number || null;
+        const row: Record<string, unknown> = {
           source:              "tenovi",
           external_patient_id: en.patient.id,
           clinic_id:           clinicId,
           full_name:           en.patient.name || "Unknown",
-          phone:               en.patient.phone_number || null,
           program:             module === "RTM" ? "RTM" : "RPM",
           diagnoses,
           enrollment_status:   enrollmentStatus,
           consent:             true,
           risk:                "low",
           language:            "EN",
-        });
+        };
+        if (phoneValue) row.phone = phoneValue;
+        rows.push(row);
       }
     }
   }
@@ -118,15 +120,15 @@ async function syncPatients(clinics: ClinicRow[]): Promise<void> {
       }
       const { clinicId, patients } = r.value;
       for (const p of patients) {
-        const diagnoses = p.primary_diagnosis ? [p.primary_diagnosis] : [];
-        rows.push({
+        const diagnoses   = p.primary_diagnosis ? [p.primary_diagnosis] : [];
+        const phoneValue  = p.phone || p.mobile_phone || p.cell_phone || null;
+        const row: Record<string, unknown> = {
           source:              "smartmeter",
           external_patient_id: String(p.patient_id),
           clinic_id:           clinicId,
           full_name:           [p.first_name, p.last_name].filter(Boolean).join(" ").trim() || "Unknown",
           dob:                 p.dob || null,
           sex:                 p.sex || null,
-          phone:               p.phone || null,
           language:            p.language || "EN",
           insurance_payer:     p.insurance_type || null,
           program:             "RPM",
@@ -134,7 +136,11 @@ async function syncPatients(clinics: ClinicRow[]): Promise<void> {
           enrollment_status:   "active",
           consent:             true,
           risk:                "low",
-        });
+        };
+        // Only include phone in the upsert when the API returns one.
+        // If null, omit the key entirely so the DB retains whatever it already has.
+        if (phoneValue) row.phone = phoneValue;
+        rows.push(row);
       }
     }
   }

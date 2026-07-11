@@ -1,5 +1,22 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin, supabaseAnon } from "../lib/supabase";
+
+// Normalize any phone string to E.164.
+// - Always preserves explicit country code (+ or 00 prefix).
+// - Only adds +1 for bare 10-digit numbers (US/CA assumption).
+// - International numbers (UAE +971, etc.) must include the country code when entered.
+export function normalizePhone(raw: string | undefined | null): string | undefined {
+  if (!raw) return undefined;
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const digits = trimmed.replace(/\D/g, "");
+  if (!digits) return undefined;
+  if (trimmed.startsWith("+"))  return `+${digits}`;                        // +971... +1... +20...
+  if (trimmed.startsWith("00")) return `+${digits.slice(2)}`;               // 00971... international dialing prefix
+  if (digits.length === 10)     return `+1${digits}`;                       // bare US 10-digit
+  if (digits.length === 11 && digits.startsWith("1")) return `+${digits}`;  // 1XXXXXXXXXX US
+  return `+${digits}`;                                                       // pass through — assume country code included
+}
 import { findProfileById } from "../models/profile";
 import { listPatients, findPatientById, createPatient, deletePatient, updatePatientProfileExtras } from "../models/patient";
 import { enrollTenoviPatient, getTenoviFacilities, getRpmToken } from "../services/tenovi";
@@ -19,7 +36,7 @@ export async function list(req: Request, res: Response) {
   const profile = await findProfileById(req.auth!.sub);
   const { source, status, program, risk, search } = req.query as Record<string, string>;
   const page  = Math.max(0, parseInt(req.query.page  as string) || 0);
-  const limit = Math.min(200, Math.max(10, parseInt(req.query.limit as string) || 100));
+  const limit = Math.min(1000, Math.max(10, parseInt(req.query.limit as string) || 100));
 
   let clinicId: string | undefined;
   if (profile && profile.role !== "super_admin") {
@@ -251,7 +268,7 @@ export async function enroll(req: Request, res: Response) {
     fullName,
     dob:              dob || undefined,
     sex:              sex || undefined,
-    phone:            phone || undefined,
+    phone:            normalizePhone(phone),
     language:         language || undefined,
     program:          program as "RPM" | "RTM" | "CCM" | "PCM",
     diagnoses,

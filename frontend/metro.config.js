@@ -72,12 +72,20 @@ function resolveFile(basePath) {
   return null;
 }
 
+// Node.js built-in polyfills for browser — needed by @twilio/voice-sdk
+config.resolver.extraNodeModules = {
+  ...config.resolver.extraNodeModules,
+  events: path.resolve(__dirname, 'node_modules/events'),
+};
+
 // Packages whose "exports" field points to .mjs files that OneDrive serves
 // as cloud-only placeholders Metro can't read. Route them to their CJS dist.
 const CJS_OVERRIDES = {
-  'lucide-react-native': path.resolve(__dirname, 'node_modules/lucide-react-native/dist/cjs/lucide-react-native.js'),
-  'merge-options':       path.resolve(__dirname, 'node_modules/merge-options/index.js'),
-  'use-latest-callback': path.resolve(__dirname, 'node_modules/use-latest-callback/lib/src/index.js'),
+  'lucide-react-native':  path.resolve(__dirname, 'node_modules/lucide-react-native/dist/cjs/lucide-react-native.js'),
+  'merge-options':        path.resolve(__dirname, 'node_modules/merge-options/index.js'),
+  'use-latest-callback':  path.resolve(__dirname, 'node_modules/use-latest-callback/lib/src/index.js'),
+  // Force CJS build — ESM version uses getter-only re-exports that break Metro's _interopNamespace
+  '@twilio/voice-sdk':    path.resolve(__dirname, 'node_modules/@twilio/voice-sdk/es5/twilio.js'),
 };
 
 config.resolver.resolveRequest = (context, moduleName, platform) => {
