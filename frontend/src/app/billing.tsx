@@ -1,6 +1,6 @@
 import {
-  AlertCircle, BookOpen, CheckCircle2, ChevronDown, Clock, Download,
-  DollarSign, FileText, RefreshCw, Settings, Sliders, Trash2,
+  AlertCircle, BookOpen, Building2, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight,
+  Clock, Download, DollarSign, FileText, RefreshCw, Settings, Sliders, Trash2,
   TrendingUp, Users, Zap,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
@@ -21,6 +21,7 @@ import {
   api, ApiError,
   type BillingRecord, type BillingRuleItem, type FeeScheduleItem,
   type DosOffsetItem, type RevenueBreakdown,
+  type MonthlyBillingReport, type ClinicReport, type Clinic,
 } from '@/lib/api';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -55,7 +56,7 @@ function currentMonth(): string {
 
 // ── Main screen ────────────────────────────────────────────────────────────
 
-type Tab = 'queue' | 'revenue' | 'admin';
+type Tab = 'queue' | 'revenue' | 'report' | 'clinic' | 'admin';
 
 export default function BillingScreen() {
   const colors  = useTheme();
@@ -68,6 +69,8 @@ export default function BillingScreen() {
   const tabs: { key: Tab; label: string; icon: typeof FileText }[] = [
     { key: 'queue',   label: 'Queue',   icon: FileText },
     { key: 'revenue', label: 'Revenue', icon: TrendingUp },
+    { key: 'report',  label: 'Report',  icon: Download },
+    { key: 'clinic',  label: 'Clinic',  icon: Building2 },
     ...(isSuperAdmin ? [{ key: 'admin' as Tab, label: 'Admin', icon: Settings }] : []),
   ];
 
@@ -99,6 +102,8 @@ export default function BillingScreen() {
 
       {tab === 'queue'   && <QueueTab   session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
       {tab === 'revenue' && <RevenueTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
+      {tab === 'report'  && <MonthlyReportTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
+      {tab === 'clinic'  && <ClinicSummaryTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
       {tab === 'admin'   && isSuperAdmin && <AdminTab session={session} colors={colors} />}
     </View>
   );
@@ -937,6 +942,518 @@ function EmptyNote({ colors, text }: { colors: ReturnType<typeof useTheme>; text
       <AlertCircle size={16} color={colors.textSecondary} />
       <Text style={[styles.emptyText, { color: colors.textSecondary }]}>{text}</Text>
     </View>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TAB: MONTHLY BILLING REPORT
+// ═══════════════════════════════════════════════════════════════════════════
+
+function prevMonth(m: string): string {
+  const [y, mo] = m.split('-').map(Number);
+  const d = new Date(y, mo - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function nextMonth(m: string): string {
+  const [y, mo] = m.split('-').map(Number);
+  const d = new Date(y, mo, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function MonthlyReportTab({ session, colors, isSuperAdmin }: { session: any; colors: any; isSuperAdmin: boolean }) {
+  const [month, setMonth]   = useState(currentMonth());
+  const [report, setReport] = useState<MonthlyBillingReport | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError]   = useState('');
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+  const [exporting, setExporting] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!session) return;
+    setLoading(true); setError('');
+    try {
+      const data = await api.getMonthlyReport(session.token, month);
+      setReport(data);
+      const init: Record<string, boolean> = {};
+      data.clinics.forEach((c) => { init[c.clinic_id] = true; });
+      setExpanded(init);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load report.');
+    } finally { setLoading(false); }
+  }, [session, month]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const toggle = (id: string) => setExpanded((p) => ({ ...p, [id]: !p[id] }));
+
+  const buildMonthlyHtml = (r: MonthlyBillingReport): string => {
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const clinicSections = r.clinics.map((c) => {
+      const rows = c.records.map((rec) => `
+        <tr>
+          <td>${esc(rec.patient_name ?? '—')}<br><span style="font-size:9px">MRN: ${esc(rec.patient_mrn ?? '—')}</span></td>
+          <td>${esc(rec.patient_program ?? '—')}</td>
+          <td>${esc(rec.insurance_payer ?? '—')}</td>
+          <td>${esc(rec.cpt_code)}</td>
+          <td style="text-align:center">${rec.reading_count}</td>
+          <td style="text-align:center">${rec.total_minutes} min</td>
+          <td>${esc(rec.status)}</td>
+          <td style="text-align:right">${rec.projected_amount != null ? `$${rec.projected_amount.toFixed(2)}` : '—'}</td>
+        </tr>`).join('');
+      return `
+        <div style="margin-bottom:16px">
+          <b style="font-size:12px">${esc(c.clinic_name)}</b>
+          <span style="margin-left:12px;font-size:10px">${c.records.length} records · ${c.readingCount} readings · $${c.subtotalProjected.toFixed(2)} projected</span>
+          <table style="margin-top:4px">
+            <thead><tr>
+              <th>Patient (MRN)</th><th>Program</th><th>Insurance</th><th>CPT</th>
+              <th>Readings</th><th>Min</th><th>Status</th><th>Projected</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+            <tfoot><tr>
+              <td colspan="7" style="font-weight:bold;border-top:1px solid #000">Subtotal</td>
+              <td style="font-weight:bold;text-align:right;border-top:1px solid #000">$${c.subtotalProjected.toFixed(2)}</td>
+            </tr></tfoot>
+          </table>
+        </div>`;
+    }).join('');
+    const byCptRows = r.totals.byCpt.map((c) =>
+      `<tr><td>${esc(c.cpt_code)}</td><td style="text-align:center">${c.count}</td><td style="text-align:right">$${c.projected.toFixed(2)}</td></tr>`
+    ).join('');
+    return `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:Courier,monospace;font-size:11px;color:#000;margin:0;padding:20px;background:#fff}
+      table{width:100%;border-collapse:collapse;font-size:10px;margin-top:4px}
+      th{border-bottom:2px solid #000;text-align:left;padding:3px 5px;font-weight:bold}
+      td{border-bottom:1px solid #ccc;padding:3px 5px;vertical-align:top}
+      @media print{@page{margin:1cm;size:A4 landscape}body{padding:6px}}
+    </style></head><body>
+    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+      <div style="font-size:15px;font-weight:bold">RPMCARES — MONTHLY BILLING REPORT</div>
+      <div>Period: ${esc(r.period.label)} &nbsp;|&nbsp; Generated: ${new Date(r.generatedAt).toLocaleString('en-US')}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;border:1px solid #000;padding:8px;margin-bottom:12px;text-align:center">
+      <div><b>${r.totals.records}</b><br>Records</div>
+      <div><b>${r.totals.totalReadings}</b><br>Readings</div>
+      <div><b>$${r.totals.totalProjected.toFixed(2)}</b><br>Projected</div>
+      <div><b>$${r.totals.totalActual.toFixed(2)}</b><br>Actual</div>
+    </div>
+    ${byCptRows ? `<b>CPT Summary</b><table style="width:auto;margin-bottom:14px"><thead><tr><th>CPT</th><th>Claims</th><th>Projected</th></tr></thead><tbody>${byCptRows}</tbody></table>` : ''}
+    ${clinicSections}
+    <div style="border-top:2px solid #000;padding-top:8px;font-weight:bold;text-align:right">Grand Total: $${r.totals.totalProjected.toFixed(2)}</div>
+    <div style="margin-top:6px;font-size:10px;text-align:center">For billing review only — not a clinical record.</div>
+    </body></html>`;
+  };
+
+  const exportMonthlyPdf = async () => {
+    if (!report) return;
+    setExporting(true);
+    try {
+      const Print   = await import('expo-print');
+      const Sharing = await import('expo-sharing');
+      const { uri } = await Print.printToFileAsync({ html: buildMonthlyHtml(report), base64: false });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Monthly Billing — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+      }
+    } catch (e: any) { console.warn('[billing] monthly PDF failed:', e.message); }
+    finally { setExporting(false); }
+  };
+
+  const STATUS_COLOR: Record<string, string> = {
+    pending: colors.warning, generated: colors.info ?? colors.primary,
+    signed: colors.success, submitted: colors.success, paid: colors.success,
+    voided: colors.critical,
+  };
+
+  return (
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+      {/* Month picker */}
+      <Card style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 }}>
+        <Pressable onPress={() => setMonth(prevMonth(month))} style={{ padding: 6 }}>
+          <ChevronLeft size={18} color={colors.primary} />
+        </Pressable>
+        <Text style={{ color: colors.text, fontWeight: '700', fontSize: 14 }}>
+          {new Date(month + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+        </Text>
+        <Pressable onPress={() => setMonth(nextMonth(month))} disabled={month >= currentMonth()}
+          style={{ padding: 6, opacity: month >= currentMonth() ? 0.3 : 1 }}>
+          <ChevronRight size={18} color={colors.primary} />
+        </Pressable>
+      </Card>
+
+      {loading && (
+        <View style={{ alignItems: 'center', paddingVertical: 32 }}>
+          <ActivityIndicator color={colors.primary} />
+        </View>
+      )}
+      {!!error && <Text style={{ color: colors.critical, textAlign: 'center', fontSize: 13 }}>{error}</Text>}
+
+      {report && (
+        <>
+          {/* Totals strip */}
+          <Card style={{ gap: 10 }}>
+            <Text style={{ color: colors.text, fontWeight: '800', fontSize: 14 }}>Summary — {report.period.label}</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+              {[
+                ['Records',   String(report.totals.records)],
+                ['Readings',  String(report.totals.totalReadings)],
+                ['Projected', fmt$(report.totals.totalProjected)],
+                ['Actual',    fmt$(report.totals.totalActual)],
+              ].map(([l, v]) => (
+                <View key={l} style={{ flex: 1, minWidth: 70, backgroundColor: colors.background, borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                  <Text style={{ color: colors.text, fontWeight: '800', fontSize: 15 }}>{v}</Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{l}</Text>
+                </View>
+              ))}
+            </View>
+            {/* CPT breakdown */}
+            {report.totals.byCpt.length > 0 && (
+              <View style={{ gap: 4 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 11, fontWeight: '600' }}>BY CPT CODE</Text>
+                {report.totals.byCpt.map((c) => (
+                  <View key={c.cpt_code} style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={{ color: colors.text, fontWeight: '600', fontSize: 12 }}>{c.cpt_code}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 12 }}>{c.count} claims</Text>
+                    <Text style={{ color: colors.text, fontSize: 12 }}>{fmt$(c.projected)}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </Card>
+
+          {/* Per-clinic sections */}
+          {report.clinics.map((clinic) => (
+            <Card key={clinic.clinic_id} style={{ gap: 0, padding: 0, overflow: 'hidden' }}>
+              <Pressable
+                onPress={() => toggle(clinic.clinic_id)}
+                style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', padding: 14 }}
+              >
+                <View style={{ flex: 1 }}>
+                  <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>{clinic.clinic_name}</Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, marginTop: 2 }}>
+                    {clinic.records.length} records · {clinic.readingCount} readings · {fmt$(clinic.subtotalProjected)} projected
+                  </Text>
+                </View>
+                <ChevronDown size={16} color={colors.textSecondary}
+                  style={{ transform: [{ rotate: expanded[clinic.clinic_id] ? '180deg' : '0deg' }] }} />
+              </Pressable>
+
+              {expanded[clinic.clinic_id] && (
+                <View style={{ borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }}>
+                  {/* Table header */}
+                  <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 6, backgroundColor: colors.background }}>
+                    {['Patient', 'CPT', 'Readings', 'Min', 'Status', 'Amt'].map((h) => (
+                      <Text key={h} style={{ color: colors.textSecondary, fontSize: 10, fontWeight: '700', flex: h === 'Patient' ? 3 : 1 }}>{h}</Text>
+                    ))}
+                  </View>
+                  {clinic.records.map((r) => (
+                    <View key={r.id} style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border + '44' }}>
+                      <View style={{ flex: 3 }}>
+                        <Text style={{ color: colors.text, fontSize: 11, fontWeight: '600' }} numberOfLines={1}>{r.patient_name ?? '—'}</Text>
+                        <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{r.patient_program ?? ''} · {r.insurance_payer ?? '—'}</Text>
+                      </View>
+                      <Text style={{ color: colors.text, fontWeight: '600', fontSize: 11, flex: 1 }}>{r.cpt_code}</Text>
+                      <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{r.reading_count}</Text>
+                      <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{r.total_minutes}</Text>
+                      <View style={{ flex: 1 }}>
+                        <View style={{ backgroundColor: (STATUS_COLOR[r.status] ?? colors.textSecondary) + '22', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, alignSelf: 'flex-start' }}>
+                          <Text style={{ color: STATUS_COLOR[r.status] ?? colors.textSecondary, fontSize: 9, fontWeight: '700' }}>
+                            {r.status.toUpperCase().slice(0, 4)}
+                          </Text>
+                        </View>
+                      </View>
+                      <Text style={{ color: colors.text, fontSize: 11, flex: 1 }}>{fmt$(r.projected_amount)}</Text>
+                    </View>
+                  ))}
+                  {/* Clinic subtotal */}
+                  <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8, backgroundColor: colors.primary + '0A' }}>
+                    <Text style={{ color: colors.text, fontWeight: '700', fontSize: 11, flex: 3 }}>Subtotal</Text>
+                    <Text style={{ flex: 1 }} />
+                    <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{clinic.readingCount}</Text>
+                    <Text style={{ flex: 1 }} />
+                    <Text style={{ flex: 1 }} />
+                    <Text style={{ color: colors.text, fontWeight: '700', fontSize: 11, flex: 1 }}>{fmt$(clinic.subtotalProjected)}</Text>
+                  </View>
+                </View>
+              )}
+            </Card>
+          ))}
+
+          {report.clinics.length === 0 && (
+            <Card style={{ alignItems: 'center', paddingVertical: 32, gap: 8 }}>
+              <FileText size={24} color={colors.textSecondary} />
+              <Text style={{ color: colors.textSecondary, fontSize: 13 }}>No billing records for this period.</Text>
+            </Card>
+          )}
+
+          {/* Export PDF */}
+          <Pressable
+            onPress={exportMonthlyPdf}
+            disabled={exporting}
+            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 44, borderRadius: 999, backgroundColor: colors.primary, opacity: exporting ? 0.6 : 1 }}
+          >
+            <FileText size={15} color="#fff" />
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{exporting ? 'Generating PDF…' : 'Export Monthly Report PDF'}</Text>
+          </Pressable>
+        </>
+      )}
+    </ScrollView>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TAB: CLINIC INSURANCE SUMMARY
+// ═══════════════════════════════════════════════════════════════════════════
+
+function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; colors: any; isSuperAdmin: boolean }) {
+  const [month, setMonth]       = useState(currentMonth());
+  const [clinics, setClinics]   = useState<Clinic[]>([]);
+  const [clinicId, setClinicId] = useState('');
+  const [report, setReport]     = useState<ClinicReport | null>(null);
+  const [loading, setLoading]   = useState(false);
+  const [error, setError]       = useState('');
+  const [exporting, setExporting] = useState(false);
+
+  // Load clinic list for super_admin selector
+  useEffect(() => {
+    if (!session || !isSuperAdmin) return;
+    api.listClinics(session.token).then((data) => {
+      setClinics(data.clinics);
+      if (data.clinics.length > 0 && !clinicId) setClinicId(data.clinics[0].id);
+    }).catch(() => {});
+  }, [session, isSuperAdmin]);
+
+  const load = useCallback(async () => {
+    if (!session) return;
+    const target = isSuperAdmin ? clinicId : undefined;
+    if (isSuperAdmin && !target) return;
+    setLoading(true); setError('');
+    try {
+      const data = await api.getClinicReport(session.token, target ?? '', month);
+      setReport(data);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : 'Failed to load clinic summary.');
+    } finally { setLoading(false); }
+  }, [session, month, clinicId, isSuperAdmin]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const thresholdPct = report
+    ? Math.round((report.totals.thresholdMet / Math.max(report.totals.patients, 1)) * 100)
+    : 0;
+
+  const buildClinicHtml = (r: ClinicReport): string => {
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const patientRows = r.patients.map((p) => `
+      <tr>
+        <td>${esc(p.full_name)}<br><span style="font-size:9px">MRN: ${esc(p.mrn ?? '—')}</span></td>
+        <td>${esc(p.program ?? '—')}</td>
+        <td>${esc(p.insurance_payer ?? '—')}</td>
+        <td>${esc(p.icd10_codes.join(', ') || p.diagnoses.join(', ') || '—')}</td>
+        <td style="text-align:center">${p.totalReadings}</td>
+        <td style="text-align:center">${p.totalMinutes} min</td>
+        <td>${esc(p.cptCodes.join(', ') || '—')}</td>
+        <td style="text-align:right">$${p.totalProjected.toFixed(2)}</td>
+      </tr>`).join('');
+    const byCptRows = Object.entries(r.totals.byCpt).map(([code, v]) =>
+      `<tr><td>${esc(code)}</td><td style="text-align:center">${v.count}</td><td style="text-align:right">$${v.amount.toFixed(2)}</td></tr>`
+    ).join('');
+    return `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:Courier,monospace;font-size:11px;color:#000;margin:0;padding:20px;background:#fff}
+      table{width:100%;border-collapse:collapse;font-size:10px;margin-top:8px}
+      th{border-bottom:2px solid #000;text-align:left;padding:4px 6px;font-weight:bold}
+      td{border-bottom:1px solid #ccc;padding:4px 6px;vertical-align:top}
+      @media print{@page{margin:1cm;size:A4 landscape}body{padding:6px}}
+    </style></head><body>
+    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+      <div style="font-size:15px;font-weight:bold">RPMCARES — CLINIC INSURANCE SUMMARY</div>
+      <div>${esc(r.clinic.name)}${r.clinic.specialty ? ` · ${esc(r.clinic.specialty)}` : ''}${r.clinic.location ? ` · ${esc(r.clinic.location)}` : ''}</div>
+      <div>Period: ${esc(r.period.label)} &nbsp;|&nbsp; Generated: ${new Date(r.generatedAt).toLocaleString('en-US')}</div>
+    </div>
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;border:1px solid #000;padding:8px;margin-bottom:12px;text-align:center">
+      <div><b>${r.totals.patients}</b><br>Patients</div>
+      <div><b>${r.totals.totalReadings}</b><br>Readings</div>
+      <div><b>${r.totals.totalMinutes} min</b><br>Review Time</div>
+      <div><b>${r.totals.thresholdMet}</b><br>Threshold Met</div>
+      <div><b>$${r.totals.totalProjected.toFixed(2)}</b><br>Projected</div>
+    </div>
+    ${byCptRows ? `<b>CPT Summary</b><table style="width:auto;margin-bottom:14px"><thead><tr><th>CPT</th><th>Patients</th><th>Projected</th></tr></thead><tbody>${byCptRows}</tbody></table>` : ''}
+    <b>Patient Details</b>
+    <table><thead><tr>
+      <th>Patient (MRN)</th><th>Program</th><th>Insurance</th><th>ICD-10</th>
+      <th>Readings</th><th>Review</th><th>CPT Codes</th><th>Projected</th>
+    </tr></thead><tbody>${patientRows}</tbody></table>
+    <div style="margin-top:10px;border-top:1px solid #000;padding-top:6px;font-size:10px;text-align:center">
+      For billing review only — not a clinical record.
+    </div></body></html>`;
+  };
+
+  const exportClinicPdf = async () => {
+    if (!report) return;
+    setExporting(true);
+    try {
+      const Print   = await import('expo-print');
+      const Sharing = await import('expo-sharing');
+      const { uri } = await Print.printToFileAsync({ html: buildClinicHtml(report), base64: false });
+      if (await Sharing.isAvailableAsync()) {
+        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${report.clinic.name} — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+      }
+    } catch (e: any) { console.warn('[billing] clinic PDF failed:', e.message); }
+    finally { setExporting(false); }
+  };
+
+  return (
+    <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
+      {/* Controls */}
+      <Card style={{ gap: 10 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Pressable onPress={() => setMonth(prevMonth(month))} style={{ padding: 6 }}>
+            <ChevronLeft size={18} color={colors.primary} />
+          </Pressable>
+          <Text style={{ color: colors.text, fontWeight: '700', fontSize: 14 }}>
+            {new Date(month + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+          </Text>
+          <Pressable onPress={() => setMonth(nextMonth(month))} disabled={month >= currentMonth()}
+            style={{ padding: 6, opacity: month >= currentMonth() ? 0.3 : 1 }}>
+            <ChevronRight size={18} color={colors.primary} />
+          </Pressable>
+        </View>
+
+        {isSuperAdmin && clinics.length > 0 && (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={{ marginTop: 4 }}>
+            <View style={{ flexDirection: 'row', gap: 8 }}>
+              {clinics.map((c) => (
+                <Pressable
+                  key={c.id}
+                  onPress={() => setClinicId(c.id)}
+                  style={{ paddingHorizontal: 12, paddingVertical: 6, borderRadius: 8, backgroundColor: clinicId === c.id ? colors.primary : colors.background, borderWidth: 1, borderColor: clinicId === c.id ? colors.primary : colors.border }}
+                >
+                  <Text style={{ color: clinicId === c.id ? '#fff' : colors.text, fontSize: 12, fontWeight: '600' }}>
+                    {c.name}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+          </ScrollView>
+        )}
+      </Card>
+
+      {loading && <View style={{ alignItems: 'center', paddingVertical: 32 }}><ActivityIndicator color={colors.primary} /></View>}
+      {!!error && <Text style={{ color: colors.critical, textAlign: 'center', fontSize: 13 }}>{error}</Text>}
+
+      {report && (
+        <>
+          {/* Clinic header */}
+          <Card style={{ gap: 6 }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View style={{ width: 40, height: 40, borderRadius: 12, backgroundColor: colors.primary + '18', alignItems: 'center', justifyContent: 'center' }}>
+                <Building2 size={20} color={colors.primary} />
+              </View>
+              <View style={{ flex: 1 }}>
+                <Text style={{ color: colors.text, fontWeight: '800', fontSize: 15 }}>{report.clinic.name}</Text>
+                {report.clinic.specialty && <Text style={{ color: colors.textSecondary, fontSize: 12 }}>{report.clinic.specialty}</Text>}
+              </View>
+            </View>
+            <Text style={{ color: colors.textSecondary, fontSize: 11 }}>Period: {report.period.label}</Text>
+            <Text style={{ color: colors.textSecondary, fontSize: 10 }}>Generated: {new Date(report.generatedAt).toLocaleString('en-US')}</Text>
+          </Card>
+
+          {/* Totals */}
+          <Card style={{ gap: 10 }}>
+            <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>Clinic Totals</Text>
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10 }}>
+              {[
+                ['Patients',    String(report.totals.patients)],
+                ['Threshold',   `${report.totals.thresholdMet} / ${report.totals.patients}`],
+                ['Readings',    String(report.totals.totalReadings)],
+                ['Time (min)',  String(report.totals.totalMinutes)],
+                ['Projected',   fmt$(report.totals.totalProjected)],
+              ].map(([l, v]) => (
+                <View key={l} style={{ flex: 1, minWidth: 70, backgroundColor: colors.background, borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                  <Text style={{ color: colors.text, fontWeight: '800', fontSize: 14 }}>{v}</Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{l}</Text>
+                </View>
+              ))}
+            </View>
+
+            {/* CPT summary */}
+            {Object.keys(report.totals.byCpt).length > 0 && (
+              <View style={{ gap: 4 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 11, fontWeight: '600' }}>CPT BREAKDOWN</Text>
+                {Object.entries(report.totals.byCpt).map(([cpt, v]) => (
+                  <View key={cpt} style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
+                    <Text style={{ color: colors.text, fontWeight: '600', fontSize: 12 }}>{cpt}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 12 }}>{v.count} patients</Text>
+                    <Text style={{ color: colors.text, fontSize: 12 }}>{fmt$(v.amount)}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+          </Card>
+
+          {/* Per-patient table */}
+          <Card style={{ gap: 0, padding: 0, overflow: 'hidden' }}>
+            <View style={{ padding: 14, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }}>
+              <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>Patient Detail — Insurance Export</Text>
+            </View>
+            {/* Header row */}
+            <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 6, backgroundColor: colors.background }}>
+              {['Patient / ICD-10', 'Program', 'CPT', 'Rdgs', 'Min', 'Amt'].map((h, i) => (
+                <Text key={h} style={{ color: colors.textSecondary, fontSize: 10, fontWeight: '700', flex: i === 0 ? 3 : 1 }}>{h}</Text>
+              ))}
+            </View>
+            {report.patients.map((p) => (
+              <View key={p.patient_id} style={{ borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border + '55' }}>
+                <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8 }}>
+                  <View style={{ flex: 3 }}>
+                    <Text style={{ color: colors.text, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>{p.full_name}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 9 }} numberOfLines={1}>
+                      {p.icd10_codes.join(', ') || p.diagnoses.join(', ') || '—'}
+                    </Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 9 }}>{p.insurance_payer ?? '—'} · MRN: {p.mrn ?? '—'}</Text>
+                  </View>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{p.program ?? '—'}</Text>
+                  <Text style={{ color: colors.text, fontSize: 10, flex: 1 }}>{p.cptCodes.join('\n') || '—'}</Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{p.totalReadings}</Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{p.totalMinutes}</Text>
+                  <Text style={{ color: colors.text, fontSize: 11, flex: 1 }}>{fmt$(p.totalProjected)}</Text>
+                </View>
+                {/* Per-program breakdown */}
+                {p.byProgram.map((b) => (
+                  <View key={b.program} style={{ flexDirection: 'row', paddingHorizontal: 24, paddingBottom: 6, gap: 6 }}>
+                    <View style={{ backgroundColor: b.thresholdMet ? colors.success + '22' : colors.warning + '22', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
+                      <Text style={{ color: b.thresholdMet ? colors.success : colors.warning, fontSize: 9, fontWeight: '700' }}>
+                        {b.program} {b.thresholdMet ? '✓' : '✗'}
+                      </Text>
+                    </View>
+                    <Text style={{ color: colors.textSecondary, fontSize: 9 }}>{b.minutes} min · {b.readings} rdgs</Text>
+                    {b.billingStatus && <Text style={{ color: colors.textSecondary, fontSize: 9 }}>· {b.billingStatus}</Text>}
+                  </View>
+                ))}
+              </View>
+            ))}
+            {report.patients.length === 0 && (
+              <View style={{ alignItems: 'center', paddingVertical: 24 }}>
+                <Text style={{ color: colors.textSecondary, fontSize: 13 }}>No active patients found.</Text>
+              </View>
+            )}
+          </Card>
+
+          {/* Export PDF */}
+          <Pressable
+            onPress={exportClinicPdf}
+            disabled={exporting}
+            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 44, borderRadius: 999, backgroundColor: colors.primary, opacity: exporting ? 0.6 : 1 }}
+          >
+            <FileText size={15} color="#fff" />
+            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{exporting ? 'Generating PDF…' : 'Export Insurance Report PDF'}</Text>
+          </Pressable>
+        </>
+      )}
+    </ScrollView>
   );
 }
 

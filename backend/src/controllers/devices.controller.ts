@@ -1,7 +1,16 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
-import { getTenoviClientDevices, getTenoviBulkOrders } from "../services/tenovi";
-import { getSmartMeterOrders } from "../services/smartmeter";
+import {
+  getTenoviClientDevices, getTenoviBulkOrders,
+  getTenoviDeviceTypes, createTenoviFulfillmentOrder,
+  type TenoviFulfillmentBody,
+} from "../services/tenovi";
+import {
+  getSmartMeterOrders, getSmartMeterSkus, createSmartMeterOrder,
+  getSmartMeterActiveDevices, getSmartMeterDevicesForPatient,
+  getSmartMeterReadingsForPatient,
+  type SmartMeterSku,
+} from "../services/smartmeter";
 
 // ── Unified types ──────────────────────────────────────────────────────────
 
@@ -62,6 +71,16 @@ function normalizeSmDeviceType(model: string, lineName: string): string {
   return model || "Device";
 }
 
+function readingTypeToDeviceType(readingType: string): string {
+  const t = (readingType ?? "").toLowerCase();
+  if (t.includes("bp") || t.includes("blood_pressure") || t.includes("blood pressure")) return "BP Monitor";
+  if (t.includes("glucose") || t.includes("bg"))           return "Glucometer";
+  if (t.includes("weight") || t.includes("scale"))         return "Scale";
+  if (t.includes("spo2") || t.includes("pulse_ox") || t.includes("oxygen")) return "Pulse Ox";
+  if (t.includes("temp"))                                   return "Thermometer";
+  return readingType || "Device";
+}
+
 // ── Order status normalisation ─────────────────────────────────────────────
 
 const TENOVI_BULK_STATUS: Record<string, string> = {
@@ -103,22 +122,42 @@ export async function getDevices(_req: Request, res: Response): Promise<void> {
   const allClinics = (clinics ?? []) as Array<{ id: string; name: string; smartmeter_api_key: string | null }>;
   const smClinics  = allClinics.filter((c) => c.smartmeter_api_key);
 
-  const [tenoviResult, ...smResults] = await Promise.allSettled([
+  // Build a map of SmartMeter patient_id → { name, clinicName } from our own DB
+  // so we can label devices without extra API calls per patient.
+  const { data: ourPatients } = await supabaseAdmin
+    .from("patients")
+    .select("external_patient_id, full_name, clinics(name)")
+    .eq("source", "smartmeter");
+
+  const smPatientMap = new Map<string, { name: string; clinicName: string | null }>();
+  for (const p of (ourPatients ?? []) as any[]) {
+    const clinicName = Array.isArray(p.clinics) ? (p.clinics[0]?.name ?? null) : (p.clinics?.name ?? null);
+    smPatientMap.set(String(p.external_patient_id), { name: p.full_name, clinicName });
+  }
+
+  const [tenoviResult, patientDevicesResult, ...smActiveResults] = await Promise.allSettled([
     getTenoviClientDevices(),
+    supabaseAdmin
+      .from("patient_devices")
+      .select("id, imei, device_name, device_model, vendor, assigned_at, patient_id, patients(full_name, clinics(name))")
+      .is("unassigned_at", null),
+    // Primary SM source: derive devices from readings (carries device_id per reading)
     ...smClinics.map((c) =>
-      getSmartMeterOrders(c.smartmeter_api_key!, 30).then((orders) => ({
-        clinicId: c.id,
+      getSmartMeterActiveDevices(c.smartmeter_api_key!).then((active) => ({
+        clinicId:   c.id,
         clinicName: c.name,
-        orders,
+        active,
       })),
     ),
   ]);
 
   const devices: UnifiedDevice[] = [];
+  const seenSerials = new Set<string>();
 
-  // Tenovi devices (RPM API)
+  // ── Tenovi ────────────────────────────────────────────────────────────────
   if (tenoviResult.status === "fulfilled") {
     for (const d of tenoviResult.value) {
+      seenSerials.add(d.device.hardware_uuid);
       devices.push({
         id:                 d.id,
         serial:             d.device.hardware_uuid,
@@ -135,35 +174,62 @@ export async function getDevices(_req: Request, res: Response): Promise<void> {
       });
     }
   } else {
-    console.warn("[devices] Tenovi client-devices fetch failed:", tenoviResult.reason);
+    console.warn("[devices] Tenovi fetch failed:", tenoviResult.reason);
   }
 
-  // SmartMeter devices (derived from recent orders)
-  for (const result of smResults) {
+  // ── SmartMeter: readings-derived active devices (primary source) ──────────
+  for (const result of smActiveResults) {
     if (result.status !== "fulfilled") {
-      console.warn("[devices] SmartMeter orders fetch failed:", result.reason);
+      console.warn("[devices] SM readings fetch failed:", result.reason);
       continue;
     }
-    const { clinicName, orders } = result.value;
-    for (const order of orders) {
-      for (const line of order.lines ?? []) {
-        if (!line.serial_number && !line.imei) continue;
-        devices.push({
-          id:                `sm-${order.order_number}-${line.line_item ?? line.sku}`,
-          serial:            line.serial_number ?? line.imei ?? order.order_number,
-          type:              normalizeSmDeviceType(line.device_model ?? "", line.line_name ?? ""),
-          vendor:            "SmartMeter",
-          module:            "RPM",
-          status:            mapSmOrderStatus(order.status),
-          patientName:       order.customer_name ?? null,
-          patientExternalId: order.customer_id ?? null,
-          facilityName:      clinicName,
-          lastMeasurement:   null,
-          connected:         null,
-          shippedDate:       order.date_shipped ?? null,
-        });
-      }
+    const { clinicName, active } = result.value;
+    for (const d of active) {
+      if (seenSerials.has(d.deviceId)) continue;
+      seenSerials.add(d.deviceId);
+      const patient = smPatientMap.get(String(d.patientId));
+      devices.push({
+        id:                `sm-rdg-${d.deviceId}`,
+        serial:            d.deviceId,
+        type:              readingTypeToDeviceType(d.readingType),
+        vendor:            "SmartMeter",
+        module:            "RPM",
+        status:            "active",
+        patientName:       patient?.name ?? null,
+        patientExternalId: String(d.patientId),
+        facilityName:      patient?.clinicName ?? clinicName,
+        lastMeasurement:   d.lastReading || null,
+        connected:         null,
+        shippedDate:       null,
+      });
     }
+  }
+
+  // ── SmartMeter: patient_devices table (manually assigned, fills gaps) ─────
+  if (patientDevicesResult.status === "fulfilled") {
+    for (const row of (patientDevicesResult.value.data ?? []) as any[]) {
+      if (row.vendor !== "SmartMeter") continue;
+      if (seenSerials.has(row.imei)) continue;
+      seenSerials.add(row.imei);
+      const pat    = Array.isArray(row.patients) ? row.patients[0] : row.patients;
+      const clinic = pat ? (Array.isArray(pat.clinics) ? pat.clinics[0] : pat.clinics) : null;
+      devices.push({
+        id:                `sm-pd-${row.id}`,
+        serial:            row.imei as string,
+        type:              normalizeSmDeviceType(row.device_model ?? "", row.device_name ?? ""),
+        vendor:            "SmartMeter",
+        module:            "RPM",
+        status:            "active",
+        patientName:       pat?.full_name ?? null,
+        patientExternalId: row.patient_id ?? null,
+        facilityName:      clinic?.name ?? null,
+        lastMeasurement:   null,
+        connected:         null,
+        shippedDate:       row.assigned_at ?? null,
+      });
+    }
+  } else {
+    console.warn("[devices] patient_devices fetch failed:", (patientDevicesResult as PromiseRejectedResult).reason);
   }
 
   _devicesCache = { data: devices, expiry: Date.now() + CACHE_TTL_MS };
@@ -264,4 +330,469 @@ export async function getOrders(_req: Request, res: Response): Promise<void> {
 export function invalidateDevicesCache(): void {
   _devicesCache = null;
   _ordersCache  = null;
+}
+
+// ── Device catalog ─────────────────────────────────────────────────────────
+
+export type CatalogItem = {
+  id: string;
+  vendor: "SmartMeter" | "Tenovi";
+  name: string;
+  sku: string;
+  description: string;
+  imageUrl: string | null;
+  upFrontCost: string | null;
+  shippingCost: string | null;
+  monthlyCost: string | null;
+  inStock: boolean;
+  maxQty: number;
+  deviceModels: string[];
+  category: string;
+};
+
+type CatalogResp = { items: CatalogItem[]; smClinics: Array<{ id: string; name: string }> };
+let _catalogCache: { data: CatalogResp; expiry: number } | null = null;
+
+/** Reads the device catalog from the device_catalog table in Supabase. */
+export async function getCatalog(_req: Request, res: Response): Promise<void> {
+  if (_catalogCache && Date.now() < _catalogCache.expiry) {
+    res.json(_catalogCache.data);
+    return;
+  }
+
+  const [catalogResult, clinicsResult] = await Promise.allSettled([
+    supabaseAdmin.from("device_catalog").select("*").order("vendor").order("name"),
+    supabaseAdmin.from("clinics").select("id, name, smartmeter_api_key"),
+  ]);
+
+  if (catalogResult.status === "rejected") {
+    console.error("[catalog] DB query failed:", catalogResult.reason);
+    res.status(502).json({ error: "Failed to load device catalog from database." });
+    return;
+  }
+
+  const rows = (catalogResult.value.data ?? []) as Array<{
+    id: string; vendor: string; name: string; sku: string; description: string;
+    image_url: string | null; up_front_cost: string | null; shipping_cost: string | null;
+    monthly_cost: string | null; in_stock: boolean; max_qty: number;
+    device_models: string[]; category: string;
+  }>;
+
+  const allClinics = clinicsResult.status === "fulfilled"
+    ? ((clinicsResult.value.data ?? []) as Array<{ id: string; name: string; smartmeter_api_key: string | null }>)
+    : [];
+  const smClinics = allClinics.filter((c) => c.smartmeter_api_key);
+
+  const items: CatalogItem[] = rows.map((row) => ({
+    id:           row.id,
+    vendor:       row.vendor as "SmartMeter" | "Tenovi",
+    name:         row.name,
+    sku:          row.sku,
+    description:  row.description ?? "",
+    imageUrl:     row.image_url ?? null,
+    upFrontCost:  row.up_front_cost ?? null,
+    shippingCost: row.shipping_cost ?? null,
+    monthlyCost:  row.monthly_cost ?? null,
+    inStock:      row.in_stock ?? true,
+    maxQty:       row.max_qty ?? 10,
+    deviceModels: row.device_models ?? [],
+    category:     row.category ?? "",
+  }));
+
+  const data: CatalogResp = {
+    items,
+    smClinics: smClinics.map((c) => ({ id: c.id, name: c.name })),
+  };
+  _catalogCache = { data, expiry: Date.now() + CACHE_TTL_MS };
+  res.json(data);
+}
+
+/**
+ * Pulls device types from Tenovi and all SmartMeter clinic keys, deduplicates
+ * by id, and upserts into device_catalog. Preserves any manually-set image_url
+ * on rows that already exist in the DB.
+ */
+export async function syncDeviceCatalog(_req: Request, res: Response): Promise<void> {
+  const { data: clinics } = await supabaseAdmin
+    .from("clinics")
+    .select("id, name, smartmeter_api_key");
+  const allClinics = (clinics ?? []) as Array<{ id: string; name: string; smartmeter_api_key: string | null }>;
+  const smClinics  = allClinics.filter((c) => c.smartmeter_api_key);
+
+  // Fetch from all SM clinic keys in parallel; deduplicate by sku
+  const smSkuResults = await Promise.allSettled(
+    smClinics.map((c) => getSmartMeterSkus(c.smartmeter_api_key!)),
+  );
+  const seenSkus = new Set<string>();
+  const mergedSmSkus: SmartMeterSku[] = [];
+  for (const r of smSkuResults) {
+    if (r.status === "fulfilled") {
+      for (const sku of r.value) {
+        if (!seenSkus.has(sku.sku)) {
+          seenSkus.add(sku.sku);
+          (mergedSmSkus as typeof r.value).push(sku);
+        }
+      }
+    } else {
+      console.warn("[sync] SmartMeter SKUs failed for a clinic:", r.reason);
+    }
+  }
+
+  const [tenoviResult] = await Promise.allSettled([getTenoviDeviceTypes()]);
+
+  // Fetch existing rows so we can preserve manually-set image_urls
+  const { data: existingRows } = await supabaseAdmin
+    .from("device_catalog")
+    .select("id, image_url");
+  const existingImageMap = new Map<string, string | null>(
+    (existingRows ?? []).map((r: { id: string; image_url: string | null }) => [r.id, r.image_url]),
+  );
+
+  const now = new Date().toISOString();
+  const rows: Array<{
+    id: string; vendor: string; name: string; sku: string; description: string;
+    image_url: string | null; up_front_cost: string | null; shipping_cost: string | null;
+    monthly_cost: string | null; in_stock: boolean; max_qty: number;
+    device_models: string[]; category: string; updated_at: string;
+  }> = [];
+
+  if (tenoviResult.status === "fulfilled") {
+    for (const d of tenoviResult.value) {
+      const existingImg = existingImageMap.get(d.id);
+      rows.push({
+        id:            d.id,
+        vendor:        "Tenovi",
+        name:          d.name,
+        sku:           d.client_sku ?? d.name,
+        description:   d.metrics.map((m) => m.primary_display_name).filter(Boolean).join(", ") || d.name,
+        image_url:     existingImg !== undefined ? existingImg : (d.image ?? null),
+        up_front_cost: d.up_front_cost ?? null,
+        shipping_cost: d.shipping_cost ?? null,
+        monthly_cost:  d.monthly_cost ?? null,
+        in_stock:      d.in_stock,
+        max_qty:       10,
+        device_models: [],
+        category:      "Tenovi",
+        updated_at:    now,
+      });
+    }
+  } else {
+    console.warn("[sync] Tenovi device types failed:", tenoviResult.reason);
+  }
+
+  for (const s of mergedSmSkus) {
+    if (!s.includes_device) continue;
+    const id         = `sm-${s.sku}`;
+    const existingImg = existingImageMap.get(id) ?? null;
+    const categoryArr = Array.isArray(s.category) ? s.category : [];
+    const primaryCat  = categoryArr.find((c) => c.is_primary) ?? categoryArr[0];
+    rows.push({
+      id,
+      vendor:        "SmartMeter",
+      name:          s.description || s.sku,
+      sku:           s.sku,
+      description:   Array.isArray(s.device_model) ? s.device_model.join(", ") : (s.description ?? ""),
+      image_url:     existingImg,
+      up_front_cost: null,
+      shipping_cost: null,
+      monthly_cost:  null,
+      in_stock:      true,
+      max_qty:       (s.max_order_quantity > 0) ? s.max_order_quantity : 10,
+      device_models: Array.isArray(s.device_model) ? s.device_model : [],
+      category:      primaryCat?.category_name ?? "SmartMeter",
+      updated_at:    now,
+    });
+  }
+
+  if (rows.length === 0) {
+    res.status(502).json({ error: "No devices returned from either API." });
+    return;
+  }
+
+  const { error } = await supabaseAdmin
+    .from("device_catalog")
+    .upsert(rows, { onConflict: "id" });
+
+  if (error) {
+    console.error("[sync] upsert failed:", error);
+    res.status(502).json({ error: error.message });
+    return;
+  }
+
+  _catalogCache = null;
+  res.json({
+    synced:      rows.length,
+    tenovi:      tenoviResult.status,
+    smartmeter:  smSkuResults.every((r) => r.status === "fulfilled") ? "fulfilled" : "partial",
+    sm_clinics:  smClinics.length,
+  });
+}
+
+// ── Place SmartMeter order ─────────────────────────────────────────────────
+
+export async function placeSmartMeterOrder(req: Request, res: Response): Promise<void> {
+  const { clinicId, order, lines } = req.body as {
+    clinicId: string;
+    order: { order_number: string; customer_name: string; address1: string; address2?: string; city: string; state: string; zipcode: string; country?: string; shipping_method: string; po_number?: string };
+    lines: Array<{ sku: string; quantity: number }>;
+  };
+
+  if (!clinicId || !order || !lines?.length) {
+    res.status(400).json({ error: "clinicId, order, and lines are required." });
+    return;
+  }
+
+  const { data: clinic } = await supabaseAdmin
+    .from("clinics")
+    .select("smartmeter_api_key")
+    .eq("id", clinicId)
+    .single();
+
+  if (!(clinic as any)?.smartmeter_api_key) {
+    res.status(422).json({ error: "Clinic does not have SmartMeter integration." });
+    return;
+  }
+
+  try {
+    const result = await createSmartMeterOrder((clinic as any).smartmeter_api_key, { order, lines });
+    _ordersCache = null;
+    res.json({ success: true, order: result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
+  }
+}
+
+// ── Patient device assignment (Supabase-backed, IMEI-based) ───────────────
+//
+// SmartMeter's partner API does not expose a device-assignment endpoint —
+// that feature only exists in their portal UI. We therefore track all
+// IMEI assignments in the `patient_devices` Supabase table. This also
+// enables the feature for Tenovi patients.
+
+/** GET /api/devices/patient/:patientId/devices */
+export async function getPatientDevices(req: Request, res: Response): Promise<void> {
+  const { patientId } = req.params as { patientId: string };
+
+  // Lazy-sync SmartMeter readings into patient_devices so historical
+  // assignments are visible without manual entry.
+  const { data: patient } = await supabaseAdmin
+    .from("patients")
+    .select("source, external_patient_id, clinic_id, clinics(smartmeter_api_key)")
+    .eq("id", patientId)
+    .single();
+
+  if ((patient as any)?.source === "smartmeter" && (patient as any)?.external_patient_id) {
+    const clinicRow = Array.isArray((patient as any).clinics)
+      ? (patient as any).clinics[0]
+      : (patient as any).clinics;
+    const apiKey: string | undefined = clinicRow?.smartmeter_api_key;
+
+    if (apiKey) {
+      const readingDevices = await getSmartMeterReadingsForPatient(
+        apiKey,
+        (patient as any).external_patient_id as string,
+        365,
+      );
+
+      if (readingDevices.length > 0) {
+        // Load currently active imeis to avoid duplicate inserts
+        const { data: activeRows } = await supabaseAdmin
+          .from("patient_devices")
+          .select("imei")
+          .eq("patient_id", patientId)
+          .is("unassigned_at", null);
+        const activeImeis = new Set((activeRows ?? []).map((r: any) => r.imei as string));
+
+        for (const d of readingDevices) {
+          if (activeImeis.has(d.deviceId)) continue;
+          const { error: insertErr } = await supabaseAdmin.from("patient_devices").insert({
+            patient_id:   patientId,
+            imei:         d.deviceId,
+            device_name:  readingTypeToDeviceType(d.readingType),
+            device_model: null,
+            vendor:       "SmartMeter",
+            notes:        "Auto-synced from readings",
+            assigned_at:  d.lastReading || new Date().toISOString(),
+          });
+          if (insertErr) {
+            console.warn("[devices] auto-sync insert failed:", insertErr.message);
+          }
+        }
+      }
+    }
+  }
+
+  const { data, error } = await supabaseAdmin
+    .from("patient_devices")
+    .select("*")
+    .eq("patient_id", patientId)
+    .is("unassigned_at", null)
+    .order("assigned_at", { ascending: false });
+
+  if (error) {
+    res.status(502).json({ error: error.message });
+    return;
+  }
+  res.json({ devices: data ?? [] });
+}
+
+/** POST /api/devices/patient/:patientId/assign  body: { imei, deviceName?, deviceModel?, vendor?, notes? } */
+export async function assignPatientDevice(req: Request, res: Response): Promise<void> {
+  const { patientId } = req.params as { patientId: string };
+  const { imei, deviceName, deviceModel, vendor, notes } = req.body as {
+    imei?: string;
+    deviceName?: string;
+    deviceModel?: string;
+    vendor?: string;
+    notes?: string;
+  };
+
+  if (!imei?.trim()) {
+    res.status(400).json({ error: "imei is required." });
+    return;
+  }
+
+  // Verify patient exists
+  const { data: patient } = await supabaseAdmin
+    .from("patients")
+    .select("id")
+    .eq("id", patientId)
+    .single();
+  if (!patient) {
+    res.status(404).json({ error: "Patient not found." });
+    return;
+  }
+
+  // If this IMEI is currently assigned to another patient, surface a clear error
+  const { data: conflict } = await supabaseAdmin
+    .from("patient_devices")
+    .select("patient_id")
+    .eq("imei", imei.trim())
+    .is("unassigned_at", null)
+    .neq("patient_id", patientId)
+    .maybeSingle();
+
+  if (conflict) {
+    res.status(409).json({
+      error: "This IMEI is already assigned to another patient. Remove it from the current patient first.",
+    });
+    return;
+  }
+
+  const userId = (req as any).user?.id ?? null;
+  const { data: row, error } = await supabaseAdmin
+    .from("patient_devices")
+    .insert({
+      patient_id:          patientId,
+      imei:                imei.trim(),
+      device_name:         deviceName?.trim() ?? null,
+      device_model:        deviceModel?.trim() ?? null,
+      vendor:              vendor?.trim() ?? "SmartMeter",
+      notes:               notes?.trim() ?? null,
+      assigned_by_user_id: userId,
+    })
+    .select()
+    .single();
+
+  if (error) {
+    res.status(502).json({ error: error.message });
+    return;
+  }
+  res.json({ success: true, device: row });
+}
+
+/**
+ * GET /api/devices/patient/:patientId/detect-imeis
+ * Scans the last 180 days of SmartMeter orders for this patient's customer_id
+ * and returns IMEIs that are not already actively assigned in patient_devices.
+ */
+export async function detectPatientImeis(req: Request, res: Response): Promise<void> {
+  const { patientId } = req.params as { patientId: string };
+
+  const { data: patient } = await supabaseAdmin
+    .from("patients")
+    .select("clinic_id, external_patient_id, source")
+    .eq("id", patientId)
+    .single();
+
+  if (!patient || (patient as any).source !== "smartmeter") {
+    res.json({ detected: [] });
+    return;
+  }
+
+  const smPatientId = (patient as any).external_patient_id as string;
+
+  const { data: clinic } = await supabaseAdmin
+    .from("clinics")
+    .select("smartmeter_api_key")
+    .eq("id", (patient as any).clinic_id)
+    .single();
+
+  const apiKey = (clinic as any)?.smartmeter_api_key as string | undefined;
+  if (!apiKey) {
+    res.json({ detected: [] });
+    return;
+  }
+
+  // Fetch already-assigned IMEIs so we can filter them out
+  const { data: activeRows } = await supabaseAdmin
+    .from("patient_devices")
+    .select("imei")
+    .eq("patient_id", patientId)
+    .is("unassigned_at", null);
+  const activeImeis = new Set((activeRows ?? []).map((r: any) => r.imei as string));
+
+  try {
+    const all = await getSmartMeterDevicesForPatient(apiKey, smPatientId, 180);
+    const detected = all.filter((d) => !activeImeis.has(d.imei));
+    res.json({ detected });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
+  }
+}
+
+/** DELETE /api/devices/patient/:patientId/unassign  body: { imei: string } */
+export async function unassignPatientDevice(req: Request, res: Response): Promise<void> {
+  const { patientId } = req.params as { patientId: string };
+  const { imei } = req.body as { imei?: string };
+
+  if (!imei?.trim()) {
+    res.status(400).json({ error: "imei is required." });
+    return;
+  }
+
+  const { error } = await supabaseAdmin
+    .from("patient_devices")
+    .update({ unassigned_at: new Date().toISOString() })
+    .eq("patient_id", patientId)
+    .eq("imei", imei.trim())
+    .is("unassigned_at", null);
+
+  if (error) {
+    res.status(502).json({ error: error.message });
+    return;
+  }
+  res.json({ success: true });
+}
+
+// ── Place Tenovi fulfillment order ─────────────────────────────────────────
+
+export async function placeTenoviOrder(req: Request, res: Response): Promise<void> {
+  const body = req.body as TenoviFulfillmentBody;
+
+  if (!body?.device?.name) {
+    res.status(400).json({ error: "device.name is required." });
+    return;
+  }
+
+  try {
+    const result = await createTenoviFulfillmentOrder(body);
+    _ordersCache = null;
+    res.json({ success: true, device: result });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    res.status(502).json({ error: msg });
+  }
 }

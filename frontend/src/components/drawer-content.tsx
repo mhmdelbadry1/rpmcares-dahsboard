@@ -37,7 +37,8 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
         <View style={styles.nav}>
           <Text style={[styles.groupLabel, { color: colors.sidebarForeground }]}>Navigation</Text>
           {visible.map((item) => {
-            const isActive = item.route === "/" ? pathname === "/" : pathname.startsWith(item.route);
+            const isSub = !!item.parent;
+            const isActive = item.route === "/" ? pathname === "/" : pathname === item.route || pathname.startsWith(item.route + "/");
             const Icon = item.icon;
             return (
               <Pressable
@@ -48,18 +49,23 @@ export function AppDrawerContent(props: DrawerContentComponentProps) {
                 }}
                 style={({ pressed }) => [
                   styles.item,
+                  isSub && styles.subItem,
                   isActive && { backgroundColor: colors.sidebarAccent },
                   pressed && !isActive && { backgroundColor: colors.sidebarBorder },
                 ]}>
                 {isActive && <View style={[styles.activeBar, { backgroundColor: colors.sidebarPrimary }]} />}
+                {isSub && (
+                  <View style={[styles.subConnector, { borderColor: colors.sidebarBorder }]} />
+                )}
                 <Icon
-                  size={17}
+                  size={isSub ? 13 : 17}
                   color={isActive ? colors.sidebarPrimary : colors.sidebarForeground}
                   strokeWidth={isActive ? 2.2 : 1.8}
                 />
                 <Text
                   style={[
                     styles.itemLabel,
+                    isSub && styles.subLabel,
                     { color: isActive ? "#fff" : colors.sidebarForeground },
                     isActive && styles.itemLabelActive,
                   ]}>
@@ -141,6 +147,9 @@ const styles = StyleSheet.create({
   },
   itemLabel: { fontSize: 13.5, fontWeight: "500" },
   itemLabelActive: { fontWeight: "700" },
+  subItem:  { paddingLeft: 36, paddingVertical: 7 },
+  subLabel: { fontSize: 12.5 },
+  subConnector: { position: "absolute", left: 22, top: 0, bottom: 0, width: 10, borderLeftWidth: 1, borderBottomWidth: 1, borderBottomLeftRadius: 4 },
   footer: {
     flexDirection: "row",
     alignItems: "center",

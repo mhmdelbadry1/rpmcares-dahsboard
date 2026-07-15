@@ -1,6 +1,6 @@
 import {
   Building2, Plus, X, UserPlus, MapPin, Stethoscope,
-  Users, Bell, ShieldCheck, Trash2, Mail, ChevronRight, Key, CheckCircle2,
+  ShieldCheck, Trash2, Mail, ChevronRight, ChevronLeft, Key, CheckCircle2, FileText,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import {
@@ -14,7 +14,7 @@ import { ProgressBar } from '@/components/ui/progress-bar';
 import { useAuth } from '@/contexts/auth-context';
 import { ROLE_META } from '@/contexts/role-context';
 import { useTheme } from '@/hooks/use-theme';
-import { api, ApiError, type Clinic, type Member, type ClinicBreakdownItem } from '@/lib/api';
+import { api, ApiError, type Clinic, type Member, type ClinicBreakdownItem, type ClinicReport } from '@/lib/api';
 
 // ── types ─────────────────────────────────────────────────────────────────
 type EnrichedClinic = Clinic & {
@@ -25,6 +25,25 @@ type EnrichedClinic = Clinic & {
 // ── helpers ───────────────────────────────────────────────────────────────
 function initials(name: string) {
   return name.split(' ').map((w) => w[0]).join('').slice(0, 2).toUpperCase();
+}
+
+function currentMonth() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function monthLabel(m: string) {
+  const [y, mo] = m.split('-').map(Number);
+  return new Date(y, mo - 1, 1).toLocaleString('en-US', { month: 'long', year: 'numeric' });
+}
+function prevMonth(m: string) {
+  const [y, mo] = m.split('-').map(Number);
+  const d = new Date(y, mo - 2, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+function nextMonth(m: string) {
+  const [y, mo] = m.split('-').map(Number);
+  const d = new Date(y, mo, 1);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
 // ── Clinic Card ───────────────────────────────────────────────────────────
@@ -272,12 +291,43 @@ function ClinicDetailSheet({
   session: { token: string } | null;
 }) {
   const colors = useTheme();
-  const [apiKey, setApiKey] = useState('');
+
+  // ── Team tab state ─────────────────────────────────────────────────────
+  const [apiKey, setApiKey]   = useState('');
   const [savingKey, setSavingKey] = useState(false);
-  const [keySaved, setKeySaved] = useState(false);
+  const [keySaved, setKeySaved]   = useState(false);
 
-  useEffect(() => { if (clinic) { setApiKey(''); setKeySaved(false); } }, [clinic?.id]);
+  // ── Report tab state ───────────────────────────────────────────────────
+  const [activeTab, setActiveTab]         = useState<'team' | 'report'>('team');
+  const [reportMonth, setReportMonth]     = useState(currentMonth());
+  const [clinicReport, setClinicReport]   = useState<ClinicReport | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [reportError, setReportError]     = useState<string | null>(null);
+  const [exporting, setExporting]         = useState(false);
 
+  // Reset on clinic change
+  useEffect(() => {
+    if (clinic) {
+      setApiKey('');
+      setKeySaved(false);
+      setActiveTab('team');
+      setClinicReport(null);
+      setReportMonth(currentMonth());
+    }
+  }, [clinic?.id]);
+
+  // Load report whenever tab or month changes
+  useEffect(() => {
+    if (!clinic || !session || activeTab !== 'report') return;
+    setReportLoading(true);
+    setReportError(null);
+    api.getClinicReport(session.token, clinic.id, reportMonth)
+      .then(setClinicReport)
+      .catch((e: any) => setReportError(e?.message ?? 'Failed to load report'))
+      .finally(() => setReportLoading(false));
+  }, [clinic?.id, session, activeTab, reportMonth]);
+
+  // ── Handlers ───────────────────────────────────────────────────────────
   const handleSaveKey = async () => {
     if (!session || !clinic || !apiKey.trim()) return;
     setSavingKey(true);
@@ -337,10 +387,99 @@ function ClinicDetailSheet({
     );
   };
 
+  // ── PDF builder (B&W) ─────────────────────────────────────────────────
+  const buildClinicHtml = (r: ClinicReport): string => {
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const patientRows = r.patients.map((p) => `
+      <tr>
+        <td>${esc(p.full_name)}<br><span style="font-size:9px">${esc(p.mrn ?? '—')}</span></td>
+        <td>${esc(p.program ?? '—')}</td>
+        <td>${esc(p.insurance_payer ?? '—')}</td>
+        <td>${esc(p.icd10_codes.join(', ') || '—')}</td>
+        <td style="text-align:center">${p.totalReadings}</td>
+        <td style="text-align:center">${p.totalMinutes} min</td>
+        <td>${esc(p.cptCodes.join(', ') || '—')}</td>
+        <td style="text-align:right">$${p.totalProjected.toFixed(2)}</td>
+      </tr>`).join('');
+
+    const byCptRows = Object.entries(r.totals.byCpt).map(([code, v]) =>
+      `<tr><td>${esc(code)}</td><td style="text-align:center">${v.count}</td><td style="text-align:right">$${v.amount.toFixed(2)}</td></tr>`
+    ).join('');
+
+    return `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      *{box-sizing:border-box}
+      body{font-family:Courier,monospace;font-size:11px;color:#000;margin:0;padding:20px;background:#fff}
+      table{width:100%;border-collapse:collapse;font-size:10px;margin-top:8px}
+      th{border-bottom:2px solid #000;text-align:left;padding:4px 6px;font-size:10px;font-weight:bold}
+      td{border-bottom:1px solid #ccc;padding:4px 6px;vertical-align:top}
+      @media print{@page{margin:1cm;size:A4 landscape}body{padding:6px}}
+    </style></head><body>
+    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+      <div style="font-size:15px;font-weight:bold">RPMCARES — CLINIC REPORT</div>
+      <div>${esc(r.clinic.name)}${r.clinic.specialty ? ` · ${esc(r.clinic.specialty)}` : ''}${r.clinic.location ? ` · ${esc(r.clinic.location)}` : ''}</div>
+      <div>Period: ${esc(r.period.label)} &nbsp;|&nbsp; Generated: ${new Date(r.generatedAt).toLocaleString('en-US')}</div>
+    </div>
+
+    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;border:1px solid #000;padding:8px;margin-bottom:12px;text-align:center">
+      <div><div style="font-size:16px;font-weight:bold">${r.totals.patients}</div><div>Patients</div></div>
+      <div><div style="font-size:16px;font-weight:bold">${r.totals.totalReadings}</div><div>Readings</div></div>
+      <div><div style="font-size:16px;font-weight:bold">${r.totals.totalMinutes} min</div><div>Review Time</div></div>
+      <div><div style="font-size:16px;font-weight:bold">${r.totals.thresholdMet}</div><div>Threshold Met</div></div>
+      <div><div style="font-size:16px;font-weight:bold">$${r.totals.totalProjected.toFixed(2)}</div><div>Projected</div></div>
+    </div>
+
+    <b>CPT Summary</b>
+    <table style="width:auto;margin-bottom:16px">
+      <thead><tr><th>CPT Code</th><th>Patients</th><th>Projected</th></tr></thead>
+      <tbody>${byCptRows}</tbody>
+    </table>
+
+    <b>Patient Details</b>
+    <table>
+      <thead><tr>
+        <th>Patient (MRN)</th><th>Program</th><th>Insurance</th><th>ICD-10</th>
+        <th>Readings</th><th>Review</th><th>CPT Codes</th><th>Projected</th>
+      </tr></thead>
+      <tbody>${patientRows}</tbody>
+    </table>
+
+    <div style="margin-top:12px;border-top:1px solid #000;padding-top:8px;font-size:10px;text-align:center">
+      For billing review only — not a clinical record.
+    </div>
+    </body></html>`;
+  };
+
+  const exportPdf = async () => {
+    if (!clinicReport) return;
+    setExporting(true);
+    try {
+      const Print   = await import('expo-print');
+      const Sharing = await import('expo-sharing');
+      const html    = buildClinicHtml(clinicReport);
+      const { uri } = await Print.printToFileAsync({ html, base64: false });
+      const canShare = await Sharing.isAvailableAsync();
+      if (canShare) {
+        await Sharing.shareAsync(uri, {
+          mimeType:    'application/pdf',
+          dialogTitle: `${clinicReport.clinic.name} — ${clinicReport.period.label}`,
+          UTI:         'com.adobe.pdf',
+        });
+      }
+    } catch (e: any) {
+      console.warn('[clinic-report] PDF export failed:', e.message);
+    } finally {
+      setExporting(false);
+    }
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────
   return (
     <Modal visible={!!clinic} transparent animationType="slide" onRequestClose={onClose}>
       <Pressable style={styles.backdrop} onPress={onClose}>
         <Pressable style={[styles.sheet, { backgroundColor: colors.card, borderColor: colors.border }]}>
+
           {/* Header */}
           <View style={styles.sheetHead}>
             <View style={[styles.sheetIcon, { backgroundColor: colors.primary + '18' }]}>
@@ -365,10 +504,10 @@ function ClinicDetailSheet({
           {clinic?.stats && (
             <View style={[styles.sheetStats, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
               {[
-                ['Patients', clinic.stats.totalPatients.toLocaleString()],
+                ['Patients',   clinic.stats.totalPatients.toLocaleString()],
                 ['Compliance', `${clinic.stats.complianceRate}%`],
-                ['Alerts', clinic.stats.unreadAlerts.toLocaleString()],
-                ['Providers', clinic.providerCount.toString()],
+                ['Alerts',     clinic.stats.unreadAlerts.toLocaleString()],
+                ['Providers',  clinic.providerCount.toString()],
               ].map(([label, value]) => (
                 <View key={label} style={styles.sheetStatCell}>
                   <Text style={[styles.sheetStatValue, { color: colors.text }]}>{value}</Text>
@@ -378,86 +517,225 @@ function ClinicDetailSheet({
             </View>
           )}
 
-          {/* SmartMeter API Key (super_admin only) */}
-          {isSuperAdmin && (
-            <View style={[styles.apiKeySection, { borderColor: colors.border, backgroundColor: colors.surface2 }]}>
-              <View style={styles.apiKeyHeader}>
-                <Key size={14} color={colors.primary} />
-                <Text style={[styles.apiKeyTitle, { color: colors.text }]}>SmartMeter API Key</Text>
-                {(clinic?.hasSmartMeterKey || keySaved) && (
-                  <View style={[styles.keyBadge, { backgroundColor: colors.success + '20' }]}>
-                    <CheckCircle2 size={11} color={colors.success} />
-                    <Text style={[styles.keyBadgeText, { color: colors.success }]}>Connected</Text>
-                  </View>
-                )}
-              </View>
-              <TextInput
-                value={apiKey}
-                onChangeText={setApiKey}
-                placeholder={clinic?.hasSmartMeterKey ? 'Enter new key to replace…' : 'Paste SmartMeter API key…'}
-                placeholderTextColor={colors.textSecondary}
-                autoCapitalize="none"
-                autoCorrect={false}
-                secureTextEntry={false}
-                style={[styles.apiKeyInput, { borderColor: colors.border, color: colors.text }]}
-              />
-              <Pressable
-                onPress={handleSaveKey}
-                disabled={savingKey || !apiKey.trim()}
-                style={[styles.apiKeySave, { backgroundColor: colors.primary, opacity: (savingKey || !apiKey.trim()) ? 0.45 : 1 }]}>
-                <Text style={styles.apiKeySaveText}>{savingKey ? 'Saving…' : 'Save key'}</Text>
-              </Pressable>
-            </View>
-          )}
-
-          {/* Members */}
-          <View style={styles.membersHead}>
-            <Text style={[styles.membersTitle, { color: colors.text }]}>
-              Team ({members.length})
-            </Text>
-            <Pressable onPress={onInvite} style={[styles.inviteSmall, { backgroundColor: colors.primary }]}>
-              <UserPlus size={13} color="#fff" />
-              <Text style={styles.inviteSmallText}>Invite</Text>
-            </Pressable>
+          {/* Tab bar */}
+          <View style={[styles.tabBar, { borderColor: colors.border }]}>
+            {(['team', 'report'] as const).map((t) => {
+              const active = activeTab === t;
+              return (
+                <Pressable
+                  key={t}
+                  onPress={() => setActiveTab(t)}
+                  style={[styles.tabBtn, active && { borderBottomColor: colors.primary }]}
+                >
+                  <Text style={[styles.tabLabel, { color: active ? colors.primary : colors.textSecondary }]}>
+                    {t === 'team' ? 'Team' : 'Report'}
+                  </Text>
+                </Pressable>
+              );
+            })}
           </View>
 
-          <ScrollView style={{ maxHeight: 260 }} showsVerticalScrollIndicator={false}>
-            {members.length === 0 ? (
-              <View style={[styles.emptyMembers, { backgroundColor: colors.surface2 }]}>
-                <Mail size={20} color={colors.textSecondary} />
-                <Text style={[styles.emptyMembersText, { color: colors.textSecondary }]}>
-                  No team members yet — tap Invite to add someone.
-                </Text>
-              </View>
-            ) : (
-              members.map((m) => (
-                <View key={m.id} style={[styles.memberRow, { borderBottomColor: colors.border }]}>
-                  <View style={[styles.avatar, { backgroundColor: colors.primary + '18' }]}>
-                    <Text style={[styles.avatarText, { color: colors.primary }]}>{initials(m.name)}</Text>
+          {/* ── Team tab ── */}
+          {activeTab === 'team' && (
+            <>
+              {isSuperAdmin && (
+                <View style={[styles.apiKeySection, { borderColor: colors.border, backgroundColor: colors.surface2 }]}>
+                  <View style={styles.apiKeyHeader}>
+                    <Key size={14} color={colors.primary} />
+                    <Text style={[styles.apiKeyTitle, { color: colors.text }]}>SmartMeter API Key</Text>
+                    {(clinic?.hasSmartMeterKey || keySaved) && (
+                      <View style={[styles.keyBadge, { backgroundColor: colors.success + '20' }]}>
+                        <CheckCircle2 size={11} color={colors.success} />
+                        <Text style={[styles.keyBadgeText, { color: colors.success }]}>Connected</Text>
+                      </View>
+                    )}
                   </View>
-                  <View style={{ flex: 1 }}>
-                    <Text style={[styles.memberName, { color: colors.text }]} numberOfLines={1}>{m.name}</Text>
-                    <Text style={[styles.memberEmail, { color: colors.textSecondary }]} numberOfLines={1}>{m.email}</Text>
-                    <StatusPill tone={m.role === 'clinic_admin' ? 'info' : 'muted'}>
-                      {ROLE_META[m.role].label}
-                    </StatusPill>
-                  </View>
-                  <Pressable onPress={() => handleRemove(m)} hitSlop={10}>
-                    <Trash2 size={16} color={colors.critical} />
+                  <TextInput
+                    value={apiKey}
+                    onChangeText={setApiKey}
+                    placeholder={clinic?.hasSmartMeterKey ? 'Enter new key to replace…' : 'Paste SmartMeter API key…'}
+                    placeholderTextColor={colors.textSecondary}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    secureTextEntry={false}
+                    style={[styles.apiKeyInput, { borderColor: colors.border, color: colors.text }]}
+                  />
+                  <Pressable
+                    onPress={handleSaveKey}
+                    disabled={savingKey || !apiKey.trim()}
+                    style={[styles.apiKeySave, { backgroundColor: colors.primary, opacity: (savingKey || !apiKey.trim()) ? 0.45 : 1 }]}>
+                    <Text style={styles.apiKeySaveText}>{savingKey ? 'Saving…' : 'Save key'}</Text>
                   </Pressable>
                 </View>
-              ))
-            )}
-          </ScrollView>
+              )}
 
-          {isSuperAdmin && (
-            <Pressable
-              onPress={handleDeleteClinic}
-              style={[styles.deleteClinicBtn, { borderColor: colors.critical + '40', backgroundColor: colors.critical + '08' }]}>
-              <Trash2 size={15} color={colors.critical} />
-              <Text style={[styles.deleteClinicText, { color: colors.critical }]}>Delete clinic permanently</Text>
-            </Pressable>
+              <View style={styles.membersHead}>
+                <Text style={[styles.membersTitle, { color: colors.text }]}>
+                  Team ({members.length})
+                </Text>
+                <Pressable onPress={onInvite} style={[styles.inviteSmall, { backgroundColor: colors.primary }]}>
+                  <UserPlus size={13} color="#fff" />
+                  <Text style={styles.inviteSmallText}>Invite</Text>
+                </Pressable>
+              </View>
+
+              <ScrollView style={{ maxHeight: 220 }} showsVerticalScrollIndicator={false}>
+                {members.length === 0 ? (
+                  <View style={[styles.emptyMembers, { backgroundColor: colors.surface2 }]}>
+                    <Mail size={20} color={colors.textSecondary} />
+                    <Text style={[styles.emptyMembersText, { color: colors.textSecondary }]}>
+                      No team members yet — tap Invite to add someone.
+                    </Text>
+                  </View>
+                ) : (
+                  members.map((m) => (
+                    <View key={m.id} style={[styles.memberRow, { borderBottomColor: colors.border }]}>
+                      <View style={[styles.avatar, { backgroundColor: colors.primary + '18' }]}>
+                        <Text style={[styles.avatarText, { color: colors.primary }]}>{initials(m.name)}</Text>
+                      </View>
+                      <View style={{ flex: 1 }}>
+                        <Text style={[styles.memberName, { color: colors.text }]} numberOfLines={1}>{m.name}</Text>
+                        <Text style={[styles.memberEmail, { color: colors.textSecondary }]} numberOfLines={1}>{m.email}</Text>
+                        <StatusPill tone={m.role === 'clinic_admin' ? 'info' : 'muted'}>
+                          {ROLE_META[m.role].label}
+                        </StatusPill>
+                      </View>
+                      <Pressable onPress={() => handleRemove(m)} hitSlop={10}>
+                        <Trash2 size={16} color={colors.critical} />
+                      </Pressable>
+                    </View>
+                  ))
+                )}
+              </ScrollView>
+
+              {isSuperAdmin && (
+                <Pressable
+                  onPress={handleDeleteClinic}
+                  style={[styles.deleteClinicBtn, { borderColor: colors.critical + '40', backgroundColor: colors.critical + '08' }]}>
+                  <Trash2 size={15} color={colors.critical} />
+                  <Text style={[styles.deleteClinicText, { color: colors.critical }]}>Delete clinic permanently</Text>
+                </Pressable>
+              )}
+            </>
           )}
+
+          {/* ── Report tab ── */}
+          {activeTab === 'report' && (
+            <>
+              {/* Month navigator */}
+              <View style={styles.monthNav}>
+                <Pressable onPress={() => setReportMonth(prevMonth(reportMonth))} hitSlop={10}>
+                  <ChevronLeft size={18} color={colors.primary} />
+                </Pressable>
+                <Text style={[styles.monthLabel, { color: colors.text }]}>{monthLabel(reportMonth)}</Text>
+                <Pressable
+                  onPress={() => setReportMonth(nextMonth(reportMonth))}
+                  disabled={reportMonth >= currentMonth()}
+                  hitSlop={10}
+                >
+                  <ChevronRight size={18} color={reportMonth >= currentMonth() ? colors.textSecondary : colors.primary} />
+                </Pressable>
+              </View>
+
+              {reportLoading ? (
+                <ActivityIndicator color={colors.primary} style={{ marginTop: 24 }} />
+              ) : reportError ? (
+                <Text style={{ color: colors.critical, fontSize: 12, marginTop: 12 }}>{reportError}</Text>
+              ) : clinicReport ? (
+                <ScrollView style={{ maxHeight: 420 }} showsVerticalScrollIndicator={false}>
+
+                  {/* Summary strip */}
+                  <View style={[styles.reportStrip, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
+                    {[
+                      ['Patients',       String(clinicReport.totals.patients)],
+                      ['Readings',       String(clinicReport.totals.totalReadings)],
+                      ['Review',         `${clinicReport.totals.totalMinutes} min`],
+                      ['Threshold Met',  String(clinicReport.totals.thresholdMet)],
+                      ['Projected',      `$${clinicReport.totals.totalProjected.toFixed(0)}`],
+                    ].map(([l, v]) => (
+                      <View key={l} style={styles.reportStripCell}>
+                        <Text style={[styles.reportStripVal, { color: colors.text }]}>{v}</Text>
+                        <Text style={[styles.reportStripLbl, { color: colors.textSecondary }]}>{l}</Text>
+                      </View>
+                    ))}
+                  </View>
+
+                  {/* CPT breakdown */}
+                  {Object.keys(clinicReport.totals.byCpt).length > 0 && (
+                    <View style={{ marginBottom: 12 }}>
+                      <Text style={[styles.sectionTitle, { color: colors.text }]}>CPT Summary</Text>
+                      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 }}>
+                        {Object.entries(clinicReport.totals.byCpt).map(([code, v]) => (
+                          <View key={code} style={[styles.cptChip, { backgroundColor: colors.surface2, borderColor: colors.border }]}>
+                            <Text style={[styles.cptChipCode, { color: colors.text }]}>{code}</Text>
+                            <Text style={[styles.cptChipMeta, { color: colors.textSecondary }]}>
+                              {v.count} pts · ${v.amount.toFixed(0)}
+                            </Text>
+                          </View>
+                        ))}
+                      </View>
+                    </View>
+                  )}
+
+                  {/* Patient list */}
+                  <Text style={[styles.sectionTitle, { color: colors.text }]}>
+                    Patients ({clinicReport.patients.length})
+                  </Text>
+                  {clinicReport.patients.length === 0 ? (
+                    <Text style={{ color: colors.textSecondary, fontSize: 12, fontStyle: 'italic', marginTop: 8 }}>
+                      No active patients for this period.
+                    </Text>
+                  ) : (
+                    clinicReport.patients.map((p) => {
+                      const threshMet = p.byProgram.some((b) => b.thresholdMet);
+                      return (
+                        <View
+                          key={p.patient_id}
+                          style={[styles.reportPatRow, { borderColor: colors.border }]}
+                        >
+                          <View style={{ flex: 1 }}>
+                            <Text style={[styles.reportPatName, { color: colors.text }]} numberOfLines={1}>
+                              {p.full_name}
+                            </Text>
+                            <Text style={[styles.reportPatMeta, { color: colors.textSecondary }]}>
+                              {p.program ?? '—'}{p.mrn ? ` · ${p.mrn}` : ''}{p.insurance_payer ? ` · ${p.insurance_payer}` : ''}
+                            </Text>
+                          </View>
+                          <View style={{ alignItems: 'flex-end', gap: 2 }}>
+                            <Text style={[styles.reportPatStat, { color: colors.text }]}>
+                              {p.totalReadings} rdgs · {p.totalMinutes} min
+                            </Text>
+                            <Text style={[styles.reportPatStat, { color: colors.textSecondary }]}>
+                              {p.cptCodes.join(', ') || '—'}
+                            </Text>
+                            <View style={[
+                              styles.threshBadge,
+                              { backgroundColor: threshMet ? colors.success + '18' : colors.warning + '18' }
+                            ]}>
+                              <Text style={{ fontSize: 10, fontWeight: '700', color: threshMet ? colors.success : colors.warning }}>
+                                {threshMet ? 'MET' : 'NOT MET'}
+                              </Text>
+                            </View>
+                          </View>
+                        </View>
+                      );
+                    })
+                  )}
+                </ScrollView>
+              ) : null}
+
+              {/* Export button */}
+              <Pressable
+                onPress={exportPdf}
+                disabled={exporting || !clinicReport}
+                style={[styles.exportBtn, { backgroundColor: colors.primary, opacity: (exporting || !clinicReport) ? 0.5 : 1 }]}
+              >
+                <FileText size={14} color="#fff" />
+                <Text style={styles.exportBtnText}>{exporting ? 'Generating…' : 'Export Report PDF'}</Text>
+              </Pressable>
+            </>
+          )}
+
         </Pressable>
       </Pressable>
     </Modal>
@@ -684,4 +962,33 @@ const styles = StyleSheet.create({
   apiKeyInput: { height: 40, borderWidth: StyleSheet.hairlineWidth, borderRadius: 9, paddingHorizontal: 11, fontSize: 13.5 },
   apiKeySave: { height: 36, borderRadius: 999, alignItems: 'center', justifyContent: 'center' },
   apiKeySaveText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+
+  // Tab bar
+  tabBar: { flexDirection: 'row', borderBottomWidth: StyleSheet.hairlineWidth, marginBottom: 14 },
+  tabBtn: { flex: 1, alignItems: 'center', paddingVertical: 10, borderBottomWidth: 2, borderBottomColor: 'transparent' },
+  tabLabel: { fontSize: 13, fontWeight: '700' },
+
+  // Report tab
+  monthNav: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 },
+  monthLabel: { fontSize: 14, fontWeight: '700' },
+
+  reportStrip: { flexDirection: 'row', borderRadius: 12, borderWidth: StyleSheet.hairlineWidth, marginBottom: 14, overflow: 'hidden' },
+  reportStripCell: { flex: 1, alignItems: 'center', paddingVertical: 10 },
+  reportStripVal: { fontSize: 13, fontWeight: '800' },
+  reportStripLbl: { fontSize: 9, marginTop: 2, textTransform: 'uppercase', letterSpacing: 0.3 },
+
+  sectionTitle: { fontSize: 12.5, fontWeight: '700', marginBottom: 4 },
+
+  cptChip: { borderRadius: 8, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 10, paddingVertical: 6 },
+  cptChipCode: { fontSize: 12, fontWeight: '800' },
+  cptChipMeta: { fontSize: 10, marginTop: 1 },
+
+  reportPatRow: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8, paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth },
+  reportPatName: { fontSize: 13, fontWeight: '700' },
+  reportPatMeta: { fontSize: 10.5, marginTop: 2 },
+  reportPatStat: { fontSize: 11 },
+  threshBadge: { borderRadius: 4, paddingHorizontal: 6, paddingVertical: 2, marginTop: 2 },
+
+  exportBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, height: 42, borderRadius: 999, marginTop: 14 },
+  exportBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
 });

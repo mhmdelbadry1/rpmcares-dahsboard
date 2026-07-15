@@ -18,6 +18,8 @@ import { notesRouter } from "./routes/notes.routes";
 import { patientsRouter } from "./routes/patients.routes";
 import { timeLogsRouter } from "./routes/time-logs.routes";
 import { devicesRouter } from "./routes/devices.routes";
+import { workflowsRouter } from "./routes/workflows.routes";
+import { reportsRouter } from "./routes/reports.routes";
 
 const app = express();
 
@@ -61,6 +63,8 @@ app.use("/api/notes",          notesRouter);
 app.use("/api/patients",       patientsRouter);
 app.use("/api/time-logs",      timeLogsRouter);
 app.use("/api/devices",        devicesRouter);
+app.use("/api/workflows",      workflowsRouter);
+app.use("/api/reports",        reportsRouter);
 
 // Unknown /api/* routes → JSON 404
 app.use("/api", (_req, res) => res.status(404).json({ error: "Not found." }));

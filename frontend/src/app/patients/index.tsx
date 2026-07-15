@@ -467,23 +467,20 @@ function DeletePatientModal({
   patient: Patient | null; token: string;
   onClose: () => void; onDeleted: (id: string) => void; colors: any;
 }) {
-  const [password, setPassword] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
     if (!patient) return;
-    setPassword('');
     setError('');
   }, [patient]);
 
   async function confirm() {
     if (!patient) return;
-    if (!password) { setError('Enter your password to confirm.'); return; }
     setDeleting(true);
     setError('');
     try {
-      await api.deletePatient(token, patient.id, password);
+      await api.deletePatient(token, patient.id);
       onDeleted(patient.id);
       onClose();
     } catch (err) {
@@ -506,17 +503,8 @@ function DeletePatientModal({
             {patient?.source === 'tenovi'
               ? ' will be removed from the dashboard and discharged in Tenovi.'
               : ' will be removed from the dashboard and set to Inactive in SmartMeter.'
-            }{'\n\n'}Enter your admin password to confirm.
+            }
           </Text>
-          <TextInput
-            value={password}
-            onChangeText={setPassword}
-            placeholder="Your password"
-            placeholderTextColor={colors.textSecondary + '80'}
-            secureTextEntry
-            autoCapitalize="none"
-            style={[dm.input, { color: colors.text, borderColor: error ? '#EF4444' : colors.border, backgroundColor: colors.surface }]}
-          />
           {error ? <Text style={[dm.error, { color: '#EF4444' }]}>{error}</Text> : null}
           <View style={dm.row}>
             <Pressable onPress={onClose} style={[dm.btn, { borderColor: colors.border }]}>

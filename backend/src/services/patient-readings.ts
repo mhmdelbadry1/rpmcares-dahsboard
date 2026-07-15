@@ -3,7 +3,7 @@
  * Returns a normalised PatientReading[] regardless of source.
  */
 import { env } from "../env";
-import { getRpmToken } from "./tenovi";
+import { getTenoviHwiMeasurements } from "./tenovi";
 
 // ── Shared output type ─────────────────────────────────────────────────────
 
@@ -178,84 +178,44 @@ export async function getSmartMeterPatientReadings(
 
 // ── Tenovi ─────────────────────────────────────────────────────────────────
 
-const TENOVI_BASE = "https://api2.tenovi.com";
-
-// Tenovi measurements response (GET /clients/rpmcares/data/patients/{uuid}/measurements/)
-// Note: 'value' and 'secondary_value' are STRINGS in the Tenovi API — must parseFloat
-type RawTenoviMetric = {
-  id?: string;
-  value?: string | null;             // primary value (systolic for BP, glucose reading, etc.)
-  secondary_value?: string | null;   // diastolic for blood pressure
-  timestamp?: string;                // ISO datetime
-  metric_name_read_only?: string;    // "blood_pressure", "glucose", "pulse", etc.
-  measurement_metric?: { name?: string; primary_units?: string };
-};
-
-type TenoviMeasurementPage = {
-  count: number;
-  next: string | null;
-  results: RawTenoviMetric[];
-};
-
-// Tenovi returns non-reading metric types that should be excluded from patient readings
+// Metrics from Tenovi HWI that are device telemetry, not clinical readings
 const SKIP_TENOVI_METRICS = new Set(["battery_percentage", "signal_strength", "irregular_heartbeat"]);
 
 export async function getTenoviPatientReadings(
   externalPatientId: string,
-  days = 30,
+  startDate: string,  // YYYY-MM-DD
+  endDate: string,    // YYYY-MM-DD
 ): Promise<PatientReading[]> {
-  const token = await getRpmToken();
-  const { start, end } = dateRange(days);
-
-  const all: RawTenoviMetric[] = [];
-  let url: string | null =
-    `${TENOVI_BASE}/clients/rpmcares/data/patients/${externalPatientId}/measurements/` +
-    `?timestamp__gte=${start}&timestamp__lt=${end}&page_size=100`;
-
-  while (url) {
-    const res = await fetch(url, {
-      headers: { Authorization: `Token ${token}`, Accept: "application/json" },
-    });
-    if (!res.ok) {
-      console.warn(`[tenovi readings] ${url} → ${res.status}`);
-      break;
-    }
-    const page = (await res.json()) as TenoviMeasurementPage;
-    all.push(...(page.results ?? []));
-    url = page.next ?? null;
-  }
+  // HWI /hwi/patients/{external_id}/measurements/ aggregates all devices for the patient
+  const all = await getTenoviHwiMeasurements(externalPatientId, startDate, endDate);
 
   return all
-    .filter((r) => {
-      const metricName = r.metric_name_read_only ?? r.measurement_metric?.name ?? "";
-      return !!r.timestamp && !SKIP_TENOVI_METRICS.has(metricName);
-    })
+    .filter((r) => !!r.timestamp && !SKIP_TENOVI_METRICS.has(r.metric))
     .map((r, i): PatientReading => {
-      const rawType = r.metric_name_read_only ?? r.measurement_metric?.name ?? "";
-      const type = normaliseType(rawType);
-      const timestamp = r.timestamp ?? "";
-      const primaryVal = r.value != null ? parseFloat(r.value) : null;
-      const secondaryVal = r.secondary_value != null ? parseFloat(r.secondary_value) : null;
-      const unit = r.measurement_metric?.primary_units ?? unitForType(type);
+      const type = normaliseType(r.metric);
+      const unit = unitForType(type);
+      const primaryVal  = r.value_1 ? parseFloat(r.value_1)  : null;
+      const secondaryVal = r.value_2 ? parseFloat(r.value_2) : null;
 
-      let value: number | null = primaryVal;
+      let value: number | null = primaryVal != null && !isNaN(primaryVal) ? primaryVal : null;
       let systolic: number | undefined;
       let diastolic: number | undefined;
       let displayValue = "—";
 
       if (type === "blood_pressure") {
-        systolic = primaryVal != null && !isNaN(primaryVal) ? primaryVal : undefined;
-        diastolic = secondaryVal != null && !isNaN(secondaryVal) ? secondaryVal : undefined;
+        systolic  = primaryVal  != null && !isNaN(primaryVal)  ? primaryVal  : undefined;
+        diastolic = secondaryVal != null && !isNaN(secondaryVal) && secondaryVal !== 0
+          ? secondaryVal : undefined;
         value = systolic ?? null;
-        if (systolic != null && diastolic != null) displayValue = `${systolic}/${diastolic} mmHg`;
-        else if (systolic != null) displayValue = `${systolic} mmHg`;
-      } else if (primaryVal != null && !isNaN(primaryVal)) {
-        displayValue = `${primaryVal} ${unit}`;
+        if (systolic != null && diastolic != null) displayValue = `${systolic}/${diastolic} ${unit}`;
+        else if (systolic != null) displayValue = `${systolic} ${unit}`;
+      } else if (value != null) {
+        displayValue = `${value} ${unit}`;
       }
 
       return {
-        id: String(r.id ?? `tnv-${i}-${timestamp}`),
-        timestamp,
+        id: `tnv-${r.hwi_device_id ?? "x"}-${i}-${r.timestamp}`,
+        timestamp: r.timestamp,
         type,
         label: TYPE_LABELS[type],
         displayValue,
@@ -265,7 +225,7 @@ export async function getTenoviPatientReadings(
         diastolic,
         flagged: false,
         source: "tenovi",
-        deviceId: null,
+        deviceId: r.hwi_device_id ?? null,
       };
     })
     .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());

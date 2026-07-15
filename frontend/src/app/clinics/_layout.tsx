@@ -12,6 +12,7 @@ export default function ClinicsLayout() {
         headerTitleStyle: { fontWeight: '700' },
       }}>
       <Stack.Screen name="index" options={{ title: 'Clinics', headerLeft: () => <DrawerToggleButton tintColor={colors.text} /> }} />
+      <Stack.Screen name="time-reviews" options={{ title: 'Time Reviews' }} />
     </Stack>
   );
 }

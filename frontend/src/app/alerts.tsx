@@ -11,6 +11,7 @@ import { PageHeader } from '@/components/ui/page-header';
 import { StatusPill } from '@/components/ui/status-pill';
 import { useAuth } from '@/contexts/auth-context';
 import { useTheme } from '@/hooks/use-theme';
+import { useRouter } from 'expo-router';
 import { api, ApiError, type AlertEvent, type AlertStatus, type Clinic, type Member } from '@/lib/api';
 
 const STATUS_FILTERS: { label: string; value: AlertStatus | 'all' }[] = [
@@ -386,6 +387,7 @@ function AlertCard({ alert: a, busy, onAssign, onEscalate, onResolve }: {
   onAssign: () => void; onEscalate: () => void; onResolve: () => void;
 }) {
   const colors = useTheme();
+  const router  = useRouter();
   const isCritical  = a.tier === 'CRITICAL';
   const isResolved  = a.status === 'resolved';
   const isEscalated = a.status === 'escalated';
@@ -399,6 +401,12 @@ function AlertCard({ alert: a, busy, onAssign, onEscalate, onResolve }: {
     if (a.status === 'assigned') return 'info';
     return 'muted';
   };
+
+  function goToPatient() {
+    if (a.patient_uuid) {
+      router.push({ pathname: `/patients/${a.patient_uuid}` as any, params: { tab: 'Alerts' } });
+    }
+  }
 
   return (
     <Card style={[styles.alertCard, isResolved && styles.resolvedCard]}>
@@ -418,7 +426,11 @@ function AlertCard({ alert: a, busy, onAssign, onEscalate, onResolve }: {
           </StatusPill>
         </View>
 
-        <Text style={[styles.patientName, { color: colors.text }]} numberOfLines={1}>{a.patient_name}</Text>
+        <Pressable onPress={goToPatient} disabled={!a.patient_uuid} style={{ alignSelf: 'flex-start' }}>
+          <Text style={[styles.patientName, { color: a.patient_uuid ? colors.primary : colors.text }]} numberOfLines={1}>
+            {a.patient_name}
+          </Text>
+        </Pressable>
         <Text style={[styles.clinicLabel, { color: colors.textSecondary }]} numberOfLines={1}>{a.clinic_name}</Text>
 
         <View style={styles.readingRow}>

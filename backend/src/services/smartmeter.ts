@@ -63,6 +63,22 @@ async function smPost<T>(apiKey: string, path: string, body: object): Promise<T>
   return res.json() as Promise<T>;
 }
 
+async function smDelete(apiKey: string, path: string, body?: object): Promise<void> {
+  const jwt = await getJwt(apiKey);
+  const res = await fetchWithTimeout(`${BASE}${path}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${jwt}`,
+      ...(body ? { "Content-Type": "application/json" } : {}),
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`SmartMeter DELETE ${path} → ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
+
 // ── response shapes ────────────────────────────────────────────────────────
 export type AlertItem = {
   alert_id: number;
@@ -85,7 +101,12 @@ type BillingRecord = {
 };
 type BillingResp = { data: BillingRecord[] };
 
-type ReadingItem = { patient_id: number; date_recorded: string };
+type ReadingItem = {
+  patient_id:    number;
+  date_recorded: string;
+  device_id?:    string | number | null;
+  reading_type?: string | null;
+};
 type ReadingsResp = { data: ReadingItem[] };
 
 type WorklistResp = { data: { page: unknown[]; page_info: { total_records: number } } | string };
@@ -272,28 +293,43 @@ export type SmartMeterReadingDetail = {
 export async function getSmartMeterPatientReadingDetail(
   apiKey: string,
   patientId: string | number,
-  days = 30,
+  startDate: string,  // YYYY-MM-DD
+  endDate: string,    // YYYY-MM-DD
 ): Promise<SmartMeterReadingDetail[]> {
-  const now = new Date();
-  const s = new Date(now);
-  s.setDate(s.getDate() - Math.min(days, 31)); // SmartMeter enforces a 31-day window
-  const start = s.toISOString().slice(0, 19);
-  const end = now.toISOString().slice(0, 19);
-
-  // SmartMeter API only has POST /api/readings (no per-patient GET readings endpoint)
+  // SmartMeter enforces a 31-day window per call — chunk into 30-day pieces if needed
   try {
     const jwt = await getJwt(apiKey);
-    const res = await fetchWithTimeout(`${BASE}/api/readings`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ date_start: start, date_end: end, patient_id: Number(patientId) }),
-    });
-    if (!res.ok) {
-      console.warn(`[smartmeter] readings for patient ${patientId} → ${res.status}`);
-      return [];
+    const all: SmartMeterReadingDetail[] = [];
+
+    let chunkEnd = new Date(endDate + "T23:59:59");
+    const rangeStart = new Date(startDate + "T00:00:00");
+
+    while (chunkEnd >= rangeStart) {
+      const chunkStart = new Date(chunkEnd);
+      chunkStart.setDate(chunkStart.getDate() - 30);
+      if (chunkStart < rangeStart) chunkStart.setTime(rangeStart.getTime());
+
+      const res = await fetchWithTimeout(`${BASE}/api/readings`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          date_start: chunkStart.toISOString().slice(0, 19),
+          date_end: chunkEnd.toISOString().slice(0, 19),
+          patient_id: Number(patientId),
+        }),
+      });
+      if (res.ok) {
+        const body = (await res.json()) as { data: SmartMeterReadingDetail[] };
+        all.push(...(body.data ?? []).filter((r) => String(r.patient_id) === String(patientId)));
+      } else {
+        console.warn(`[smartmeter] readings chunk for patient ${patientId} → ${res.status}`);
+      }
+
+      chunkEnd = new Date(chunkStart);
+      chunkEnd.setDate(chunkEnd.getDate() - 1);
     }
-    const body = (await res.json()) as { data: SmartMeterReadingDetail[] };
-    return (body.data ?? []).filter((r) => String(r.patient_id) === String(patientId));
+
+    return all;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn(`[smartmeter] readings for patient ${patientId} failed: ${msg}`);
@@ -607,6 +643,286 @@ export async function getSmartMeterSummary(
     topAlerts: allAlerts.slice(0, 5),
     clinicBreakdown,
   };
+}
+
+// ── Per-patient review time records ──────────────────────────────────────
+
+export type SmartMeterReviewTime = {
+  review_time_id: number;
+  clock_start: string;          // ISO datetime
+  review_duration_seconds: number;
+  note_id: number | null;
+  note: string | null;
+  patient_interaction: boolean;
+  added_by: { user_id: number; display_name: string } | null;
+};
+
+export async function getSmartMeterReviewTime(
+  apiKey: string,
+  patientId: string | number,
+): Promise<SmartMeterReviewTime[]> {
+  try {
+    const res = await smGet<{ data: { review_times: SmartMeterReviewTime[] } }>(
+      apiKey,
+      `/api/patients/${patientId}/review-time`,
+    );
+    return res.data?.review_times ?? [];
+  } catch (err) {
+    console.warn(`[smartmeter] review-time for patient ${patientId} failed:`, err);
+    return [];
+  }
+}
+
+export async function deleteSmartMeterReviewTime(
+  apiKey: string,
+  patientId: string | number,
+  reviewTimeId: number,
+): Promise<void> {
+  const jwt = await getJwt(apiKey);
+  const res = await fetchWithTimeout(
+    `${BASE}/api/patients/${patientId}/review-time/${reviewTimeId}`,
+    { method: "DELETE", headers: { Authorization: `Bearer ${jwt}` } },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    console.warn(`[smartmeter] delete review-time ${reviewTimeId} → ${res.status}: ${text.slice(0, 200)}`);
+  }
+}
+
+export async function getSmartMeterManualReview(
+  apiKey: string,
+  patientId: string | number,
+  clockStart: string,
+  durationSeconds: number,
+  note: string | null,
+  patientInteraction: boolean,
+): Promise<{ review_time_id: number } | null> {
+  const jwt = await getJwt(apiKey);
+  const res = await fetchWithTimeout(
+    `${BASE}/api/patients/${patientId}/review-time`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${jwt}`, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clock_start:             clockStart,
+        review_duration_seconds: durationSeconds,
+        note:                    note ?? undefined,
+        patient_interaction:     patientInteraction,
+      }),
+    },
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    console.warn(`[smartmeter] manual review POST → ${res.status}: ${text.slice(0, 200)}`);
+    return null;
+  }
+  const body = await res.json().catch(() => ({})) as any;
+  return body?.data?.review_time_id != null ? { review_time_id: body.data.review_time_id } : null;
+}
+
+// ── SKU catalog ───────────────────────────────────────────────────────────
+
+export type SmartMeterSku = {
+  sku: string;
+  description: string;
+  category: Array<{ short_code: string; category_name: string; is_primary: boolean }>;
+  sort: number;
+  includes_device: boolean;
+  max_order_quantity: number;
+  item_type: string;
+  device_model: string[];
+};
+
+export async function getSmartMeterSkus(apiKey: string): Promise<SmartMeterSku[]> {
+  try {
+    const res = await smGet<{ data: SmartMeterSku[] }>(apiKey, "/api/orders/available-skus");
+    return res.data ?? [];
+  } catch (err) {
+    console.warn("[smartmeter] getSmartMeterSkus failed:", err);
+    return [];
+  }
+}
+
+// ── Order creation ────────────────────────────────────────────────────────
+
+export type SmartMeterCreateOrderBody = {
+  order: {
+    order_number: string;
+    customer_name: string;
+    address1: string;
+    address2?: string;
+    city: string;
+    state: string;
+    zipcode: string;
+    country?: string;
+    shipping_method: string;
+    po_number?: string;
+    validate?: boolean;
+  };
+  lines: Array<{ sku: string; quantity: number }>;
+  patient_id?: number;
+};
+
+export async function createSmartMeterOrder(
+  apiKey: string,
+  body: SmartMeterCreateOrderBody,
+): Promise<{ id: number; order_number: string }> {
+  const res = await smPost<{ data: { order: { id: number; order_number: string } } }>(
+    apiKey,
+    "/api/orders",
+    body,
+  );
+  return res.data.order;
+}
+
+// ── Active device fleet (from readings, which carry device_id) ────────────
+
+export type SmartMeterActiveDevice = {
+  deviceId:    string;
+  patientId:   number;
+  readingType: string;
+  lastReading: string;
+};
+
+/**
+ * Derives the active SmartMeter device fleet by scanning the last 30 days of
+ * readings. Each reading carries a device_id (IMEI / serial). We deduplicate
+ * by deviceId and keep the most-recent reading per device.
+ *
+ * This is the only reliable way to surface SmartMeter devices — the orders API
+ * only populates imei/serial_number after physical fulfilment, which never
+ * happens for clinic-shipped bulk orders.
+ */
+export async function getSmartMeterActiveDevices(apiKey: string): Promise<SmartMeterActiveDevice[]> {
+  const { start, end } = currentMonthRange();
+  try {
+    const resp = await smPost<ReadingsResp>(apiKey, "/api/readings", {
+      date_start: start,
+      date_end:   end,
+    });
+
+    const deviceMap = new Map<string, SmartMeterActiveDevice>();
+    for (const r of resp.data ?? []) {
+      if (!r.device_id) continue;
+      const deviceId = String(r.device_id);
+      const existing = deviceMap.get(deviceId);
+      if (!existing || (r.date_recorded ?? "") > existing.lastReading) {
+        deviceMap.set(deviceId, {
+          deviceId,
+          patientId:   r.patient_id ?? 0,
+          readingType: r.reading_type ?? "unknown",
+          lastReading: r.date_recorded ?? "",
+        });
+      }
+    }
+    return [...deviceMap.values()];
+  } catch (err) {
+    console.warn("[smartmeter] getSmartMeterActiveDevices failed:", err);
+    return [];
+  }
+}
+
+/**
+ * Fetches readings for a specific SM patient over `days` days.
+ * Returns one entry per unique device_id (the SM device identifier), keeping
+ * the most-recent reading as lastReading. Used to auto-sync patient_devices.
+ */
+export async function getSmartMeterReadingsForPatient(
+  apiKey:      string,
+  smPatientId: number | string,
+  days:        number = 365,
+): Promise<SmartMeterActiveDevice[]> {
+  const end   = new Date();
+  const start = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+  const fmt   = (d: Date) => d.toISOString().split("T")[0];
+  try {
+    const resp = await smPost<ReadingsResp>(apiKey, "/api/readings", {
+      date_start: fmt(start),
+      date_end:   fmt(end),
+      patient_id: Number(smPatientId),
+    });
+    const deviceMap = new Map<string, SmartMeterActiveDevice>();
+    for (const r of resp.data ?? []) {
+      if (!r.device_id) continue;
+      const deviceId = String(r.device_id);
+      const existing = deviceMap.get(deviceId);
+      if (!existing || (r.date_recorded ?? "") > existing.lastReading) {
+        deviceMap.set(deviceId, {
+          deviceId,
+          patientId:   r.patient_id ?? Number(smPatientId),
+          readingType: r.reading_type ?? "unknown",
+          lastReading: r.date_recorded ?? "",
+        });
+      }
+    }
+    return [...deviceMap.values()];
+  } catch (err) {
+    console.warn("[smartmeter] getSmartMeterReadingsForPatient failed:", err);
+    return [];
+  }
+}
+
+/** Returns the raw number of readings for a patient in a date range (no deduplication). */
+export async function countSmartMeterReadingsForPatient(
+  apiKey:      string,
+  smPatientId: number | string,
+  dateStart:   string,
+  dateEnd:     string,
+): Promise<number> {
+  try {
+    const resp = await smPost<ReadingsResp>(apiKey, "/api/readings", {
+      date_start: dateStart,
+      date_end:   dateEnd,
+      patient_id: Number(smPatientId),
+    });
+    return (resp.data ?? []).length;
+  } catch (err) {
+    console.warn("[smartmeter] countSmartMeterReadingsForPatient failed:", err);
+    return -1; // -1 = API failed, caller should use fallback
+  }
+}
+
+// ── Orders for a specific patient (for IMEI detection) ───────────────────
+
+export type DetectedImei = {
+  imei: string;
+  serialNumber: string | null;
+  deviceModel: string | null;
+  deviceName: string | null;
+  orderNumber: string;
+  orderedAt: string | null;
+};
+
+/**
+ * Fetches orders for a specific SmartMeter patient (by customer_id) over
+ * `days` days and extracts IMEIs from shipped order lines.
+ */
+export async function getSmartMeterDevicesForPatient(
+  apiKey: string,
+  smPatientId: string | number,
+  days = 180,
+): Promise<DetectedImei[]> {
+  const orders = await getSmartMeterOrders(apiKey, days);
+  const seen   = new Set<string>();
+  const result: DetectedImei[] = [];
+
+  for (const order of orders) {
+    if (String(order.customer_id) !== String(smPatientId)) continue;
+    for (const line of order.lines ?? []) {
+      const imei = line.imei ?? line.serial_number;
+      if (!imei || seen.has(imei)) continue;
+      seen.add(imei);
+      result.push({
+        imei,
+        serialNumber: line.serial_number ?? null,
+        deviceModel:  line.device_model   ?? null,
+        deviceName:   line.line_name      ?? null,
+        orderNumber:  order.order_number,
+        orderedAt:    order.date_created  ?? null,
+      });
+    }
+  }
+  return result;
 }
 
 // ── Per-patient reading counts (used by billing engine sync) ──────────────

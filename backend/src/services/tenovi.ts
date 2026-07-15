@@ -478,6 +478,99 @@ export async function getTenoviBulkOrders(): Promise<TenoviBulkOrder[]> {
   return all;
 }
 
+// ── HWI patient measurements ───────────────────────────────────────────────
+
+export type TenoviHwiMeasurement = {
+  metric: string;
+  device_name?: string | null;
+  hwi_device_id?: string | null;
+  hardware_uuid?: string | null;
+  sensor_code?: string | null;
+  value_1: string;   // primary value as decimal string (systolic for BP)
+  value_2: string;   // secondary value as decimal string (diastolic for BP, "0" otherwise)
+  created: string;
+  timestamp: string; // ISO datetime when reading was taken
+};
+
+type HwiMeasurementsPage = {
+  count: number;
+  next: string | null;
+  results: TenoviHwiMeasurement[];
+};
+
+export async function getTenoviHwiMeasurements(
+  patientExternalId: string,
+  startDate: string,  // YYYY-MM-DD
+  endDate: string,    // YYYY-MM-DD
+): Promise<TenoviHwiMeasurement[]> {
+  const base = hwiBase();
+  const start = new Date(startDate + "T00:00:00").toISOString().slice(0, 19);
+  const end   = new Date(endDate   + "T23:59:59").toISOString().slice(0, 19);
+
+  const all: TenoviHwiMeasurement[] = [];
+  let url: string | null =
+    `${base}/hwi/patients/${encodeURIComponent(patientExternalId)}/measurements/` +
+    `?timestamp__gte=${encodeURIComponent(start)}&timestamp__lt=${encodeURIComponent(end)}&page_size=100`;
+
+  while (url) {
+    const page = await hwiGetFull<HwiMeasurementsPage>(url);
+    all.push(...(page.results ?? []));
+    url = page.next ?? null;
+  }
+  return all;
+}
+
+// ── Device type catalog (HWI) ─────────────────────────────────────────────
+
+export type TenoviDeviceType = {
+  id: string;
+  name: string;
+  client_sku: string | null;
+  stock_type: string | null;
+  metrics: Array<{ name: string; primary_display_name: string }>;
+  sensor_code: string;
+  image: string | null;
+  up_front_cost: string;
+  shipping_cost: string;
+  monthly_cost: string;
+  sensor_id_required: boolean;
+  in_stock: boolean;
+  virtual: boolean;
+  deprecated: boolean;
+};
+
+export async function getTenoviDeviceTypes(): Promise<TenoviDeviceType[]> {
+  const result = await hwiGet<TenoviDeviceType[]>("/hwi/hwi-device-types/");
+  return Array.isArray(result) ? result.filter((d) => !d.deprecated && !d.virtual) : [];
+}
+
+// ── Per-device fulfillment order ───────────────────────────────────────────
+
+export type TenoviFulfillmentBody = {
+  device: {
+    name: string;
+    hardware_uuid: null;
+    fulfillment_request: {
+      shipping_name: string;
+      shipping_address: string;
+      shipping_city: string;
+      shipping_state: string;
+      shipping_zip_code: string;
+      notify_emails?: string;
+    };
+  };
+  patient?: {
+    external_id?: string;
+    name?: string;
+    phone_number?: string;
+    sms_opt_in?: boolean;
+  };
+};
+
+export async function createTenoviFulfillmentOrder(body: TenoviFulfillmentBody): Promise<unknown> {
+  return hwiPost<unknown>("/hwi/hwi-devices/", body);
+}
+
 // ── Main export ────────────────────────────────────────────────────────────
 
 export async function getTenoviSummary(allowedClinicNames?: string[]): Promise<TenoviSummary> {

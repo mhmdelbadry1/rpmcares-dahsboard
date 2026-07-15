@@ -7,6 +7,9 @@ import {
   enrollSmartMeterPatient,
   getSmartMeterPatientDetail,
   getSmartMeterPatientReadingDetail,
+  getSmartMeterReviewTime,
+  deleteSmartMeterReviewTime,
+  getSmartMeterManualReview,
   deactivateSmartMeterPatient,
   type SmartMeterPatientDetail,
 } from "../services/smartmeter";
@@ -249,11 +252,6 @@ export async function enroll(req: Request, res: Response) {
 
 export async function remove(req: Request, res: Response) {
   const { id } = req.params;
-  const { password } = req.body as { password?: string };
-
-  if (!password) {
-    return res.status(400).json({ error: "Password is required to delete a patient." });
-  }
 
   const profile = await findProfileById(req.auth!.sub);
   if (!profile) return res.status(401).json({ error: "Not authenticated." });
@@ -265,16 +263,6 @@ export async function remove(req: Request, res: Response) {
   if (!patient) return res.status(404).json({ error: "Patient not found." });
   if (profile.role === "clinic_admin" && patient.clinic_id !== profile.clinic_id) {
     return res.status(403).json({ error: "Access denied." });
-  }
-
-  // Verify the admin's password
-  const { data: userData } = await supabaseAdmin.auth.admin.getUserById(req.auth!.sub);
-  const email = userData?.user?.email;
-  if (!email) return res.status(401).json({ error: "Could not verify identity." });
-
-  const { error: signInError } = await supabaseAnon.auth.signInWithPassword({ email, password });
-  if (signInError) {
-    return res.status(401).json({ error: "Incorrect password. Patient was not deleted." });
   }
 
   // Best-effort: discharge from Tenovi
@@ -324,7 +312,19 @@ export async function remove(req: Request, res: Response) {
 
 export async function getReadings(req: Request, res: Response) {
   const { id } = req.params;
-  const days = Math.min(90, Math.max(7, parseInt(req.query.days as string) || 30));
+
+  let startDate: string;
+  let endDate: string;
+  if (req.query.start_date && req.query.end_date) {
+    startDate = req.query.start_date as string;
+    endDate   = req.query.end_date   as string;
+  } else {
+    const days = Math.min(365, Math.max(1, parseInt(req.query.days as string) || 30));
+    const now = new Date();
+    endDate   = now.toISOString().slice(0, 10);
+    const s = new Date(now); s.setDate(s.getDate() - days);
+    startDate = s.toISOString().slice(0, 10);
+  }
   const profile = await findProfileById(req.auth!.sub);
 
   const patient = await findPatientById(id);
@@ -344,7 +344,7 @@ export async function getReadings(req: Request, res: Response) {
       if (!apiKey) return res.json({ readings: [] });
 
       // Use the detail endpoint which returns full reading values (not just compliance dates)
-      const rawReadings = await getSmartMeterPatientReadingDetail(apiKey, patient.external_patient_id, days);
+      const rawReadings = await getSmartMeterPatientReadingDetail(apiKey, patient.external_patient_id, startDate, endDate);
 
       // Normalise to PatientReading shape (field names from SmartMeter api-docs.yaml readings_info schema)
       const readings = rawReadings.map((r) => {
@@ -401,7 +401,7 @@ export async function getReadings(req: Request, res: Response) {
     }
 
     if (patient.source === "tenovi") {
-      const readings = await getTenoviPatientReadings(patient.external_patient_id, days);
+      const readings = await getTenoviPatientReadings(patient.external_patient_id, startDate, endDate);
       return res.json({ readings });
     }
 
@@ -417,34 +417,278 @@ export async function getReadings(req: Request, res: Response) {
 
 export async function getPatientAlerts(req: Request, res: Response) {
   const { id } = req.params;
-  const profile = await findProfileById(req.auth!.sub);
+  const startDate = req.query.start_date as string | undefined;
+  const endDate   = req.query.end_date   as string | undefined;
 
+  const profile = await findProfileById(req.auth!.sub);
   const patient = await findPatientById(id);
   if (!patient) return res.status(404).json({ error: "Patient not found." });
   if (profile && profile.role !== "super_admin" && patient.clinic_id !== profile.clinic_id) {
     return res.status(403).json({ error: "Access denied." });
   }
 
-  // alert_events.patient_id may store the SmartMeter external ID (not our internal UUID).
-  // We try three match strategies: internal UUID, external_patient_id, and patient_name.
-  const { data, error } = await supabaseAdmin
-    .from("alert_events")
-    .select(`
-      id, timestamp, patient_name, clinic_name, alert_type, tier, value, unit, threshold,
-      device_type, reading_id, reading_time, provider_email, sms_sent, email_sent,
-      status, assigned_to, resolved_at, created_at,
-      assignee:assigned_to(id, name:full_name, email)
-    `)
-    .or(
-      [
-        `patient_id.eq.${patient.id}`,
-        `patient_id.eq.${patient.external_patient_id}`,
-        `patient_name.ilike.%${patient.full_name.replace(/'/g, "''")}%`,
-      ].join(","),
-    )
-    .order("created_at", { ascending: false })
+  // Two separate queries avoids cross-type issues when patient_id stores a numeric
+  // SmartMeter ID as text rather than a UUID. We match by patient_name (ilike) and
+  // by external_patient_id, then deduplicate the combined result.
+  const FIELDS = `
+    id, timestamp, patient_name, clinic_name, alert_type, tier, value, unit, threshold,
+    device_type, reading_id, reading_time, provider_email, sms_sent, email_sent,
+    status, assigned_to, resolved_at, created_at,
+    assignee:assigned_to(id, name, email)
+  `;
+  const escapedName = patient.full_name.replace(/'/g, "''");
+
+  function applyDateFilter(q: any) {
+    if (startDate) q = q.gte("created_at", startDate + "T00:00:00");
+    if (endDate)   q = q.lte("created_at", endDate   + "T23:59:59");
+    return q;
+  }
+
+  const [r1, r2] = await Promise.all([
+    applyDateFilter(
+      supabaseAdmin.from("alert_events").select(FIELDS)
+        .ilike("patient_name", `%${escapedName}%`)
+    ).order("created_at", { ascending: false }).limit(200),
+
+    applyDateFilter(
+      supabaseAdmin.from("alert_events").select(FIELDS)
+        .eq("patient_id", patient.external_patient_id)
+    ).order("created_at", { ascending: false }).limit(200),
+  ]);
+
+  // Deduplicate by id, sort newest first
+  const seen = new Set<string>();
+  const merged: any[] = [];
+  for (const row of [...(r1.data ?? []), ...(r2.data ?? [])]) {
+    if (!seen.has(row.id)) { seen.add(row.id); merged.push(row); }
+  }
+  merged.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+
+  return res.json({ alerts: merged });
+}
+
+// ── Patient review time (SmartMeter only, DB-cached) ──────────────────────
+
+const REVIEW_TIME_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+async function getApiKey(clinicId: string): Promise<string | null> {
+  const { data } = await supabaseAdmin
+    .from("clinics")
+    .select("smartmeter_api_key")
+    .eq("id", clinicId)
+    .maybeSingle();
+  return (data as any)?.smartmeter_api_key ?? null;
+}
+
+async function syncReviewTimesToDb(
+  patient: Awaited<ReturnType<typeof findPatientById>>,
+  apiKey: string,
+) {
+  if (!patient) return;
+  const smData = await getSmartMeterReviewTime(apiKey, patient.external_patient_id);
+  const now = new Date().toISOString();
+
+  // Only replace SmartMeter-synced rows — keep manual and profile_view entries
+  await supabaseAdmin
+    .from("patient_review_times")
+    .delete()
+    .eq("patient_id", patient.id)
+    .eq("source", "smartmeter_sync");
+
+  if (smData.length > 0) {
+    const rows = smData.map((e) => ({
+      patient_id:          patient.id,
+      sm_review_time_id:   e.review_time_id,
+      clock_start:         e.clock_start,
+      duration_seconds:    e.review_duration_seconds ?? 0,
+      note:                e.note ?? null,
+      patient_interaction: e.patient_interaction ?? false,
+      logged_by:           e.added_by?.display_name ?? null,
+      synced_at:           now,
+      source:              "smartmeter_sync",
+    }));
+    await supabaseAdmin.from("patient_review_times").insert(rows);
+  }
+}
+
+export async function getReviewTime(req: Request, res: Response) {
+  const { id } = req.params;
+
+  const profile = await findProfileById(req.auth!.sub);
+  const patient = await findPatientById(id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  if (profile && profile.role !== "super_admin" && patient.clinic_id !== profile.clinic_id) {
+    return res.status(403).json({ error: "Access denied." });
+  }
+
+  // ── Serve from DB cache (all sources) ─────────────────────────────────────
+  const { data: cached } = await supabaseAdmin
+    .from("patient_review_times")
+    .select("*")
+    .eq("patient_id", id)
+    .order("clock_start", { ascending: false })
     .limit(200);
 
-  if (error) return res.status(500).json({ error: error.message });
-  return res.json({ alerts: data ?? [] });
+  // For SmartMeter patients: refresh the SmartMeter-synced subset when stale
+  if (patient.source === "smartmeter") {
+    const cutoff = new Date(Date.now() - REVIEW_TIME_TTL_MS).toISOString();
+    const smRows = (cached ?? []).filter((r: any) => r.source === "smartmeter_sync");
+    const hasFresh = smRows.some((r: any) => r.synced_at >= cutoff);
+
+    if (!hasFresh) {
+      const apiKey = await getApiKey(patient.clinic_id);
+      if (apiKey) {
+        if (smRows.length > 0) {
+          // Stale — return current data and refresh in background
+          syncReviewTimesToDb(patient, apiKey).catch((e) =>
+            console.warn("[review-time] background sync failed:", e),
+          );
+          return res.json({ reviewTimes: cached ?? [] });
+        }
+        // No SmartMeter rows yet — sync synchronously on first load
+        await syncReviewTimesToDb(patient, apiKey);
+        const { data: fresh } = await supabaseAdmin
+          .from("patient_review_times")
+          .select("*")
+          .eq("patient_id", id)
+          .order("clock_start", { ascending: false })
+          .limit(200);
+        return res.json({ reviewTimes: fresh ?? [] });
+      }
+    }
+  }
+
+  return res.json({ reviewTimes: cached ?? [] });
+}
+
+export async function deleteReviewTime(req: Request, res: Response) {
+  const { id, entryId } = req.params;
+
+  const profile = await findProfileById(req.auth!.sub);
+  const patient = await findPatientById(id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  if (profile && profile.role !== "super_admin" && patient.clinic_id !== profile.clinic_id) {
+    return res.status(403).json({ error: "Access denied." });
+  }
+
+  const { data: entry } = await supabaseAdmin
+    .from("patient_review_times")
+    .select("sm_review_time_id")
+    .eq("id", entryId)
+    .eq("patient_id", id)
+    .maybeSingle();
+
+  if (!entry) return res.status(404).json({ error: "Review time entry not found." });
+
+  // Best-effort: delete from SmartMeter
+  if (entry.sm_review_time_id) {
+    const apiKey = await getApiKey(patient.clinic_id);
+    if (apiKey) {
+      await deleteSmartMeterReviewTime(apiKey, patient.external_patient_id, entry.sm_review_time_id).catch(
+        (e) => console.warn("[review-time] SmartMeter delete failed:", e),
+      );
+    }
+  }
+
+  await supabaseAdmin.from("patient_review_times").delete().eq("id", entryId);
+  return res.json({ ok: true });
+}
+
+// ── Log manual review time ─────────────────────────────────────────────────
+
+export async function logManualReview(req: Request, res: Response) {
+  const { id } = req.params;
+  const { duration_seconds, note, patient_interaction } = req.body as {
+    duration_seconds: number;
+    note?: string;
+    patient_interaction?: boolean;
+  };
+
+  if (!duration_seconds || duration_seconds < 1) {
+    return res.status(400).json({ error: "duration_seconds must be ≥ 1." });
+  }
+
+  const profile = await findProfileById(req.auth!.sub);
+  const patient = await findPatientById(id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  if (profile && profile.role !== "super_admin" && patient.clinic_id !== profile.clinic_id) {
+    return res.status(403).json({ error: "Access denied." });
+  }
+
+  const clockStart = new Date().toISOString();
+  const loggedBy = (profile as any)?.name ?? "Staff";
+
+  // For SmartMeter patients: also post to SmartMeter API best-effort
+  let smReviewTimeId: number | null = null;
+  if (patient.source === "smartmeter") {
+    const apiKey = await getApiKey(patient.clinic_id);
+    if (apiKey) {
+      try {
+        const result = await getSmartMeterManualReview(
+          apiKey, patient.external_patient_id, clockStart, duration_seconds,
+          note ?? null, patient_interaction ?? false,
+        );
+        smReviewTimeId = result?.review_time_id ?? null;
+      } catch (e) {
+        console.warn("[manual-review] SmartMeter post failed:", e);
+      }
+    }
+  }
+
+  const { data: entry } = await supabaseAdmin
+    .from("patient_review_times")
+    .insert({
+      patient_id:          id,
+      sm_review_time_id:   smReviewTimeId,
+      clock_start:         clockStart,
+      duration_seconds,
+      note:                note ?? null,
+      patient_interaction: patient_interaction ?? false,
+      logged_by:           loggedBy,
+      synced_at:           clockStart,
+      source:              "manual",
+    })
+    .select("*")
+    .single();
+
+  return res.json({ ok: true, entry });
+}
+
+// ── Log profile-view session ───────────────────────────────────────────────
+
+export async function logProfileView(req: Request, res: Response) {
+  const { id } = req.params;
+  const { duration_seconds } = req.body as { duration_seconds: number };
+
+  if (!duration_seconds || duration_seconds < 30) {
+    return res.status(400).json({ error: "duration_seconds must be ≥ 30." });
+  }
+
+  const profile = await findProfileById(req.auth!.sub);
+  const patient = await findPatientById(id);
+  if (!patient) return res.status(404).json({ error: "Patient not found." });
+  if (profile && profile.role !== "super_admin" && patient.clinic_id !== profile.clinic_id) {
+    return res.status(403).json({ error: "Access denied." });
+  }
+
+  const clockStart = new Date(Date.now() - duration_seconds * 1000).toISOString();
+  const loggedBy = (profile as any)?.name ?? "Staff";
+
+  const { data: entry } = await supabaseAdmin
+    .from("patient_review_times")
+    .insert({
+      patient_id:          id,
+      sm_review_time_id:   null,
+      clock_start:         clockStart,
+      duration_seconds,
+      note:                null,
+      patient_interaction: false,
+      logged_by:           loggedBy,
+      synced_at:           new Date().toISOString(),
+      source:              "profile_view",
+    })
+    .select("*")
+    .single();
+
+  return res.json({ ok: true, entry });
 }
