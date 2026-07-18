@@ -559,7 +559,16 @@ function PatientCard({
           <View style={{ flex: 1, gap: 2 }}>
             <Text style={[cd.name, { color: colors.text }]}>{patient.full_name}</Text>
             <Text style={[cd.meta, { color: colors.textSecondary }]}>
-              {patient.sex === 'M' ? 'Male' : patient.sex === 'F' ? 'Female' : 'Unknown'} · {patient.enrollment_status}
+              {(() => {
+                const g = patient.sex === 'M' ? 'Male'
+                  : patient.sex === 'F' ? 'Female'
+                  : patient.profile_extras?.gender
+                    ? (patient.profile_extras.gender.toLowerCase().startsWith('f') ? 'Female'
+                      : patient.profile_extras.gender.toLowerCase().startsWith('m') ? 'Male'
+                      : patient.profile_extras.gender)
+                    : null;
+                return g ? `${g} · ${patient.enrollment_status}` : patient.enrollment_status;
+              })()}
             </Text>
             <Text style={[cd.meta, { color: colors.textSecondary }]} numberOfLines={1}>
               {patient.clinic_name ?? 'Unknown clinic'}

@@ -219,10 +219,34 @@ export async function getSmartMeterPatientDetail(
 ): Promise<SmartMeterPatientDetail | null> {
   try {
     const res = await withRetry(
-      () => smGet<{ data: SmartMeterPatientDetail }>(apiKey, `/api/patients/${patientId}`),
+      () => smGet<{ data: any }>(apiKey, `/api/patients/${patientId}`),
       `patient-detail-${patientId}`,
     );
-    return res.data ?? null;
+    const d = res.data;
+    if (!d) return null;
+    // SmartMeter API uses date_of_birth, mobile_phone, etc. — map to our internal names
+    return {
+      patient_id:    d.patient_id ?? d.id,
+      first_name:    d.first_name,
+      middle_name:   d.middle_name,
+      last_name:     d.last_name,
+      suffix:        d.suffix,
+      display_name:  d.display_name,
+      gender:        d.gender,
+      race:          d.race,
+      dob:           d.dob ?? d.date_of_birth ?? null,
+      language:      d.language,
+      time_zone:     d.time_zone ?? d.time_zone_name ?? d.timezone ?? null,
+      email:         d.email,
+      home_phone:    d.home_phone ?? d.home_phone_number ?? null,
+      cell_phone:    d.cell_phone ?? d.mobile_phone ?? null,
+      message_delivery_preference: d.message_delivery_preference,
+      preferred_phone:       d.preferred_phone,
+      preferred_time_of_day: d.preferred_time_of_day,
+      preferred_day_of_week: d.preferred_day_of_week,
+      shipping_address:      d.shipping_address ?? null,
+      physical_address:      d.physical_address ?? null,
+    };
   } catch {
     return null;
   }

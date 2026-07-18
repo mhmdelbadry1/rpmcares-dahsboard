@@ -67,6 +67,19 @@ export async function getOne(req: Request, res: Response) {
     const apiKey = (clinicRow as any)?.smartmeter_api_key as string | null;
     if (apiKey) {
       smDetail = await getSmartMeterPatientDetail(apiKey, patient.external_patient_id);
+      // Sync gender/DOB back to our DB so registry card shows correct values
+      if (smDetail) {
+        const updates: Record<string, string> = {};
+        if (!patient.sex && smDetail.gender) {
+          const g = smDetail.gender.toLowerCase();
+          if (g.startsWith("f")) updates.sex = "F";
+          else if (g.startsWith("m")) updates.sex = "M";
+        }
+        if (!patient.dob && smDetail.dob) updates.dob = smDetail.dob;
+        if (Object.keys(updates).length > 0) {
+          await supabaseAdmin.from("patients").update(updates).eq("id", patient.id);
+        }
+      }
     }
   }
 

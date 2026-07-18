@@ -2405,11 +2405,11 @@ export default function PatientDetail() {
           </View>
           <View style={{ flex: 1 }}>
             <Text style={[s.name, { color: colors.text }]}>{patient.full_name}</Text>
-            <Text style={[s.heroDemog, { color: colors.textSecondary }]}>
-              {ageFromDob(dob)}
-              {gender ? ` · ${gender}` : ''}
-              {dob ? ` · DOB ${dob}` : ''}
-            </Text>
+            {(dob || gender) ? (
+              <Text style={[s.heroDemog, { color: colors.textSecondary }]}>
+                {[dob ? ageFromDob(dob) : null, gender].filter(Boolean).join(' · ')}
+              </Text>
+            ) : null}
             <View style={s.badgeRow}>
               <StatusPill tone={enrollTone(patient.enrollment_status)}>
                 {patient.enrollment_status}
@@ -2481,7 +2481,7 @@ export default function PatientDetail() {
           <Text style={[s.aiEyebrow, { color: colors.primary }]}>AI PATIENT SUMMARY</Text>
         </View>
         <Text style={[s.aiBody, { color: colors.text }]}>
-          {nameParts[0]} is a {ageFromDob(dob)} {gender ? gender.toLowerCase() : 'patient'} enrolled in {patient.program}
+          {nameParts[0]} is a {dob ? `${ageFromDob(dob)} ` : ''}{gender ? gender.toLowerCase() : 'patient'} enrolled in {patient.program}
           {patient.diagnoses.length > 0 ? ` for ${patient.diagnoses.slice(0, 2).join(', ')}` : ''}.
           {' '}Enrollment status is {patient.enrollment_status}; risk classified as {patient.risk}.
           Monitored via {patient.source === 'tenovi' ? 'Tenovi RPM' : 'SmartMeter'}.
