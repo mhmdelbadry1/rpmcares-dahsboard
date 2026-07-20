@@ -1,4 +1,5 @@
 import { supabaseAdmin } from "../lib/supabase";
+import { fetchReviewMinutesMap, minutesFromMap } from "../lib/review-minutes";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -265,46 +266,110 @@ export async function listBillingQueue(
   role: string,
   userClinicId: string | null,
   filters: BillingQueueFilters = {},
-): Promise<BillingQueueRow[]> {
-  let q = supabaseAdmin
-    .from("billing_records")
-    .select(`*, patients!inner(full_name, dob), clinics(name)`)
-    .not("status", "eq", "voided")
-    .order("dos", { ascending: false, nullsFirst: false })
-    .order("created_at", { ascending: false })
-    .limit(500);
+): Promise<{ records: BillingQueueRow[]; totalCount: number }> {
 
-  if (role === "clinic_admin" && userClinicId) {
-    q = q.eq("clinic_id", userClinicId);
-  } else if (filters.clinicId) {
-    q = q.eq("clinic_id", filters.clinicId);
-  }
-
-  if (filters.program)       q = q.eq("program", filters.program);
-  if (filters.insuranceType) q = q.eq("insurance_type", filters.insuranceType);
-  if (filters.cptCode)       q = q.eq("cpt_code", filters.cptCode);
-  if (filters.status)        q = q.eq("status", filters.status);
-  if (filters.month) {
+  function buildMonthRange() {
+    if (!filters.month || !/^\d{4}-\d{2}$/.test(filters.month)) return null;
     const [y, m] = filters.month.split("-").map(Number);
-    const start = `${y}-${String(m).padStart(2, "0")}-01`;
+    if (m < 1 || m > 12) return null;
+    const start   = `${y}-${String(m).padStart(2, "0")}-01`;
     const lastDay = new Date(y, m, 0).getDate();
-    const end = `${y}-${String(m).padStart(2, "0")}-${lastDay}`;
-    q = q.gte("cycle_start", start).lte("cycle_start", end);
+    const end     = `${y}-${String(m).padStart(2, "0")}-${lastDay}`;
+    return { start, end };
   }
 
-  const { data, error } = await q;
-  if (error) throw error;
+  function applyFilters(q: any) {
+    if (role === "clinic_admin" && userClinicId) q = q.eq("clinic_id", userClinicId);
+    else if (filters.clinicId) q = q.eq("clinic_id", filters.clinicId);
+    if (filters.program)       q = q.eq("program", filters.program);
+    if (filters.insuranceType) q = q.eq("insurance_type", filters.insuranceType);
+    if (filters.cptCode)       q = q.eq("cpt_code", filters.cptCode);
+    if (filters.status)        q = q.eq("status", filters.status);
+    const range = buildMonthRange();
+    if (range) q = q.lte("cycle_start", range.end).gte("cycle_end", range.start);
+    return q;
+  }
 
-  return (data ?? []).map((row: any) => ({
-    ...row,
-    patient_name:    row.patients?.full_name ?? "",
-    patient_dob:     row.patients?.dob ?? null,
-    clinic_name:     row.clinics?.name ?? null,
-    projected_amount: row.projected_amount ? parseFloat(row.projected_amount) : null,
-    actual_amount:    row.actual_amount    ? parseFloat(row.actual_amount)    : null,
-    patients: undefined,
-    clinics:  undefined,
-  }));
+  // Exact total count
+  const { count } = await applyFilters(
+    supabaseAdmin
+      .from("billing_records")
+      .select("*", { count: "exact", head: true })
+      .not("status", "eq", "voided"),
+  );
+  const totalCount = count ?? 0;
+
+  // Load current fee schedules so projected_amount reflects the latest admin-set rates,
+  // not the stale value stored at evaluation time.
+  const { data: feeData } = await supabaseAdmin
+    .from("fee_schedules")
+    .select("payer, cpt_code, amount")
+    .is("end_date", null);
+  const liveFeeMap = new Map<string, number>();
+  for (const f of feeData ?? []) {
+    liveFeeMap.set(`${f.payer}:${f.cpt_code}`, parseFloat(f.amount));
+  }
+  function liveAmount(insuranceType: string, cptCode: string): number | null {
+    return liveFeeMap.get(`${insuranceType}:${cptCode}`)
+      ?? liveFeeMap.get(`Medicare:${cptCode}`)
+      ?? null;
+  }
+
+  // Paginate to fetch all rows (Supabase caps each request at 1000)
+  const PAGE = 1000;
+  let allRows: any[] = [];
+  for (let from = 0; from < totalCount; from += PAGE) {
+    const { data, error } = await applyFilters(
+      supabaseAdmin
+        .from("billing_records")
+        .select(`*, patients!inner(full_name, dob), clinics(name)`)
+        .not("status", "eq", "voided")
+        .order("dos", { ascending: false, nullsFirst: false })
+        .order("created_at", { ascending: false })
+        .order("id", { ascending: false })
+        .range(from, from + PAGE - 1),
+    );
+    if (error) throw error;
+    allRows = allRows.concat(data ?? []);
+  }
+
+  // Live-compute total_minutes from time_logs + patient_review_times (batched to avoid URL limits)
+  if (allRows.length > 0) {
+    const patientIds = [...new Set(allRows.map((r: any) => r.patient_id as string))];
+    const allStarts  = allRows.map((r: any) => r.cycle_start as string).filter(Boolean);
+    const allEnds    = allRows.map((r: any) => r.cycle_end   as string).filter(Boolean);
+    const rangeMin   = allStarts.reduce((a, b) => (a < b ? a : b));
+    const rangeMax   = allEnds.reduce((a, b) => (a > b ? a : b));
+
+    const rtMap = await fetchReviewMinutesMap(patientIds, rangeMin, rangeMax);
+    for (const row of allRows) {
+      row.total_minutes = minutesFromMap(rtMap, row.patient_id, row.cycle_start, row.cycle_end ?? row.cycle_start);
+    }
+  }
+
+  // Deduplicate by id — inner join can cause the same row to appear across pages
+  // if its position shifts between requests due to ordering ties.
+  const seen = new Set<string>();
+  const uniqueRows = allRows.filter((row: any) => {
+    if (seen.has(row.id)) return false;
+    seen.add(row.id);
+    return true;
+  });
+
+  return {
+    totalCount,
+    records: uniqueRows.map((row: any) => ({
+      ...row,
+      patient_name:     row.patients?.full_name ?? "",
+      patient_dob:      row.patients?.dob       ?? null,
+      clinic_name:      row.clinics?.name       ?? null,
+      projected_amount: liveAmount(row.insurance_type, row.cpt_code)
+        ?? (row.projected_amount ? parseFloat(row.projected_amount) : null),
+      actual_amount:    row.actual_amount ? parseFloat(row.actual_amount) : null,
+      patients: undefined,
+      clinics:  undefined,
+    })),
+  };
 }
 
 export async function updateBillingRecord(
@@ -354,9 +419,14 @@ export async function getRevenueBreakdown(
   if (role === "clinic_admin" && userClinicId) q = q.eq("clinic_id", userClinicId);
   else if (clinicId) q = q.eq("clinic_id", clinicId);
 
-  const { data, error } = await q;
-  if (error) throw error;
-  const rows: any[] = data ?? [];
+  const PAGE = 1000;
+  let rows: any[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await q.range(from, from + PAGE - 1);
+    if (error) throw error;
+    rows = rows.concat(data ?? []);
+    if ((data ?? []).length < PAGE) break;
+  }
 
   const totalProjected = rows.reduce((s, r) => s + (parseFloat(r.projected_amount) || 0), 0);
   const totalSubmitted = rows
@@ -414,21 +484,18 @@ export async function getPatientBillingSummary(patientId: string) {
       .from("billing_cycles")
       .select("*")
       .eq("patient_id", patientId)
-      .order("cycle_start", { ascending: false })
-      .limit(12),
+      .order("cycle_start", { ascending: false }),
     supabaseAdmin
       .from("billing_records")
       .select("*")
       .eq("patient_id", patientId)
       .order("cycle_start", { ascending: false })
-      .order("cpt_code")
-      .limit(100),
+      .order("cpt_code"),
     supabaseAdmin
       .from("patient_cycle_stats")
       .select("*")
       .eq("patient_id", patientId)
-      .order("cycle_start", { ascending: false })
-      .limit(12),
+      .order("cycle_start", { ascending: false }),
   ]);
 
   return {

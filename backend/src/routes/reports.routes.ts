@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { requireAuth, requireRole } from "../middleware/auth.middleware";
-import { getPatientReport, getClinicReport, getMonthlyReport } from "../controllers/reports.controller";
+import { getPatientReport, getClinicReport, getMonthlyReport, getExportedBillingReports } from "../controllers/reports.controller";
 
 export const reportsRouter = Router();
 
@@ -9,6 +9,13 @@ reportsRouter.get(
   requireAuth,
   requireRole("super_admin", "clinic_admin", "staff"),
   getPatientReport,
+);
+
+reportsRouter.get(
+  "/patient/:patientId/exported",
+  requireAuth,
+  requireRole("super_admin", "clinic_admin", "staff"),
+  getExportedBillingReports,
 );
 
 reportsRouter.get(

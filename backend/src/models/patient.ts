@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "../lib/supabase";
 
-export type PatientSource  = "tenovi" | "smartmeter";
+export type PatientSource  = "tenovi" | "smartmeter" | "local";
 export type PatientProgram = "RPM" | "RTM" | "CCM" | "PCM";
 
 // Matches the public.patients table already in Supabase

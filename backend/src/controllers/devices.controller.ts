@@ -8,7 +8,8 @@ import {
 import {
   getSmartMeterOrders, getSmartMeterSkus, createSmartMeterOrder,
   getSmartMeterActiveDevices, getSmartMeterDevicesForPatient,
-  getSmartMeterReadingsForPatient, getSmartMeterReadingTypesForPatient,
+  getSmartMeterReadingTypesForPatient,
+  getSmartMeterPatientDevices, assignSmartMeterDevice, unassignSmartMeterDevice,
   type SmartMeterSku,
 } from "../services/smartmeter";
 
@@ -599,26 +600,26 @@ export async function getPatientDevices(req: Request, res: Response): Promise<vo
         .is("unassigned_at", null);
       const activeImeis = new Set((activeRows ?? []).map((r: any) => r.imei as string));
 
-      // Step 2: Try readings-based sync (device_id from /api/readings)
-      const readingDevices = await getSmartMeterReadingsForPatient(apiKey, smPatientId, 365);
-      for (const d of readingDevices) {
-        if (activeImeis.has(d.deviceId)) continue;
+      // Step 2: Primary source — GET /api/patients/{id} returns the device list directly.
+      // This avoids the /api/readings 500 error and gives accurate real IMEIs.
+      const smDevices = await getSmartMeterPatientDevices(apiKey, smPatientId);
+      for (const d of smDevices) {
+        if (activeImeis.has(d.device_id)) continue;
         const { error: insertErr } = await supabaseAdmin.from("patient_devices").insert({
           patient_id:   patientId,
-          imei:         d.deviceId,
-          device_name:  readingTypeToDeviceType(d.readingType),
-          device_model: null,
+          imei:         d.device_id,
+          device_name:  d.device_type ?? d.device_model ?? "SmartMeter Device",
+          device_model: d.device_model ?? null,
           vendor:       "SmartMeter",
-          notes:        "Auto-synced from readings",
-          assigned_at:  d.lastReading || new Date().toISOString(),
+          notes:        "Auto-synced from SmartMeter",
+          assigned_at:  d.date_added || new Date().toISOString(),
         });
-        if (!insertErr) activeImeis.add(d.deviceId);
-        else console.warn("[devices] readings auto-sync insert failed:", insertErr.message);
+        if (!insertErr) activeImeis.add(d.device_id);
+        else console.warn("[devices] SM device sync insert failed:", insertErr.message);
       }
 
-      // Step 3: Fallback — if readings gave us nothing, try orders-based IMEI detection.
-      // Many clinics ship devices directly without recording device_id in readings.
-      if (readingDevices.length === 0) {
+      // Step 3: Fallback — patient detail returned no devices, try orders for IMEI.
+      if (smDevices.length === 0) {
         try {
           const fromOrders = await getSmartMeterDevicesForPatient(apiKey, smPatientId, 365);
           for (const d of fromOrders) {
@@ -640,9 +641,8 @@ export async function getPatientDevices(req: Request, res: Response): Promise<vo
         }
       }
 
-      // Step 4: Final fallback — if STILL no devices, the patient has readings but
-      // SmartMeter returns no device_id or IMEI. Create synthetic entries per reading type
-      // so the device always appears and can be removed/reassigned.
+      // Step 4: Final fallback — patient has readings but no device listed anywhere.
+      // Create synthetic entries per reading type so the device is always visible.
       const stillNone = (
         await supabaseAdmin.from("patient_devices").select("id", { count: "exact" })
           .eq("patient_id", patientId).is("unassigned_at", null)
@@ -749,6 +749,22 @@ export async function assignPatientDevice(req: Request, res: Response): Promise<
     res.status(502).json({ error: error.message });
     return;
   }
+
+  // Mirror the assignment in SmartMeter (best-effort, doesn't fail the request)
+  const { data: patientFull } = await supabaseAdmin
+    .from("patients")
+    .select("source, external_patient_id, clinic_id, clinics(smartmeter_api_key)")
+    .eq("id", patientId)
+    .single();
+  if ((patientFull as any)?.source === "smartmeter" && (patientFull as any)?.external_patient_id) {
+    const clinicRow = Array.isArray((patientFull as any).clinics)
+      ? (patientFull as any).clinics[0] : (patientFull as any).clinics;
+    const apiKey: string | undefined = clinicRow?.smartmeter_api_key;
+    if (apiKey) {
+      await assignSmartMeterDevice(apiKey, (patientFull as any).external_patient_id, imei.trim());
+    }
+  }
+
   res.json({ success: true, device: row });
 }
 
@@ -824,6 +840,25 @@ export async function unassignPatientDevice(req: Request, res: Response): Promis
     res.status(502).json({ error: error.message });
     return;
   }
+
+  // Mirror the removal in SmartMeter (best-effort, skip synthetic IMEIs)
+  const isSynthetic = /^SM-\d+-/.test(imei.trim());
+  if (!isSynthetic) {
+    const { data: patientFull } = await supabaseAdmin
+      .from("patients")
+      .select("source, external_patient_id, clinic_id, clinics(smartmeter_api_key)")
+      .eq("id", patientId)
+      .single();
+    if ((patientFull as any)?.source === "smartmeter" && (patientFull as any)?.external_patient_id) {
+      const clinicRow = Array.isArray((patientFull as any).clinics)
+        ? (patientFull as any).clinics[0] : (patientFull as any).clinics;
+      const apiKey: string | undefined = clinicRow?.smartmeter_api_key;
+      if (apiKey) {
+        await unassignSmartMeterDevice(apiKey, (patientFull as any).external_patient_id, imei.trim());
+      }
+    }
+  }
+
   res.json({ success: true });
 }
 

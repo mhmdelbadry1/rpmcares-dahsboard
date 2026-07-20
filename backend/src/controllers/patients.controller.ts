@@ -100,7 +100,16 @@ export async function getOne(req: Request, res: Response) {
     }
   }
 
-  return res.json({ patient, smDetail });
+  // Attach the patient's current billing cycle so the profile header can show it
+  const { data: currentCycle } = await supabaseAdmin
+    .from("billing_cycles")
+    .select("cycle_start, cycle_end")
+    .eq("patient_id", patient.id)
+    .order("cycle_start", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  return res.json({ patient: { ...patient, current_cycle: currentCycle ?? null }, smDetail });
 }
 
 // ── System-scoped clinic list (for the enrollment modal dropdown) ──────────
@@ -144,7 +153,17 @@ export async function getSystemClinics(req: Request, res: Response) {
     return res.json({ clinics: matched });
   }
 
-  return res.status(400).json({ error: "Query param 'system' must be 'tenovi' or 'smartmeter'." });
+  if (system === "local") {
+    // Local patients can be enrolled in any clinic
+    const { data, error } = await supabaseAdmin
+      .from("clinics")
+      .select("id, name, specialty, location")
+      .order("name");
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json({ clinics: data ?? [] });
+  }
+
+  return res.status(400).json({ error: "Query param 'system' must be 'tenovi', 'smartmeter', or 'local'." });
 }
 
 // ── Enroll patient ─────────────────────────────────────────────────────────
@@ -177,8 +196,8 @@ export async function enroll(req: Request, res: Response) {
       error: "Missing required fields: clinicId, system, firstName, lastName, program.",
     });
   }
-  if (rpmSource !== "tenovi" && rpmSource !== "smartmeter") {
-    return res.status(400).json({ error: "system must be 'tenovi' or 'smartmeter'." });
+  if (rpmSource !== "tenovi" && rpmSource !== "smartmeter" && rpmSource !== "local") {
+    return res.status(400).json({ error: "system must be 'tenovi', 'smartmeter', or 'local'." });
   }
   if (!["RPM", "RTM", "CCM", "PCM"].includes(program)) {
     return res.status(400).json({ error: "program must be RPM, RTM, CCM, or PCM." });
@@ -202,7 +221,10 @@ export async function enroll(req: Request, res: Response) {
   // External system must succeed before we write to the DB
   let externalPatientId: string;
 
-  if (rpmSource === "tenovi") {
+  if (rpmSource === "local") {
+    // No external system — generate an internal identifier
+    externalPatientId = `local-${clinic.id.slice(0, 8)}-${Date.now()}`;
+  } else if (rpmSource === "tenovi") {
     let facilities: { id: string; name: string }[];
     try {
       facilities = await getTenoviFacilities();
@@ -235,7 +257,7 @@ export async function enroll(req: Request, res: Response) {
       const msg = err instanceof Error ? err.message : String(err);
       return res.status(422).json({ error: `Tenovi enrollment failed: ${msg}` });
     }
-  } else {
+  } else if (rpmSource === "smartmeter") {
     const apiKey = clinic.smartmeter_api_key as string | null;
     if (!apiKey) {
       return res.status(422).json({
@@ -263,7 +285,7 @@ export async function enroll(req: Request, res: Response) {
 
   const patient = await createPatient({
     clinicId:         clinic.id,
-    source:           rpmSource as "tenovi" | "smartmeter",
+    source:           rpmSource as "tenovi" | "smartmeter" | "local",
     externalPatientId,
     fullName,
     dob:              dob || undefined,

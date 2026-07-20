@@ -801,6 +801,59 @@ export async function createSmartMeterOrder(
   return res.data.order;
 }
 
+// ── Patient devices (from patient detail endpoint) ────────────────────────
+
+export type SmartMeterDevice = {
+  device_id:                string;
+  device_model:             string | null;
+  device_type:              string | null;
+  date_added:               string | null;
+  most_recent_reading_date: string | null;
+};
+
+/** Returns devices assigned to a patient in SmartMeter (via GET /api/patients/{id}). */
+export async function getSmartMeterPatientDevices(
+  apiKey: string,
+  smPatientId: string | number,
+): Promise<SmartMeterDevice[]> {
+  try {
+    const res = await smGet<{ data: { devices?: SmartMeterDevice[] } }>(
+      apiKey,
+      `/api/patients/${smPatientId}`,
+    );
+    return (res.data?.devices ?? []).filter((d) => d?.device_id);
+  } catch (err) {
+    console.warn(`[smartmeter] getSmartMeterPatientDevices for ${smPatientId} failed:`, err);
+    return [];
+  }
+}
+
+/** Assigns a device (by IMEI/device_id) to a SmartMeter patient. */
+export async function assignSmartMeterDevice(
+  apiKey: string,
+  smPatientId: string | number,
+  deviceId: string,
+): Promise<void> {
+  try {
+    await smPost(apiKey, `/api/patients/${smPatientId}/device`, { device_id: deviceId });
+  } catch (err) {
+    console.warn(`[smartmeter] assignSmartMeterDevice ${deviceId} → patient ${smPatientId} failed:`, err);
+  }
+}
+
+/** Removes a device from a SmartMeter patient. */
+export async function unassignSmartMeterDevice(
+  apiKey: string,
+  smPatientId: string | number,
+  deviceId: string,
+): Promise<void> {
+  try {
+    await smDelete(apiKey, `/api/patients/${smPatientId}/device/${encodeURIComponent(deviceId)}`);
+  } catch (err) {
+    console.warn(`[smartmeter] unassignSmartMeterDevice ${deviceId} from patient ${smPatientId} failed:`, err);
+  }
+}
+
 // ── Active device fleet (from readings, which carry device_id) ────────────
 
 export type SmartMeterActiveDevice = {
@@ -928,16 +981,20 @@ export async function countSmartMeterReadingsForPatient(
   dateStart:   string,
   dateEnd:     string,
 ): Promise<number> {
+  const numericId = Number(smPatientId);
+  if (!Number.isFinite(numericId) || numericId <= 0) return -1; // non-numeric external ID — skip silently
   try {
     const resp = await smPost<ReadingsResp>(apiKey, "/api/readings", {
       date_start: dateStart,
       date_end:   dateEnd,
-      patient_id: Number(smPatientId),
+      patient_id: numericId,
     });
     return (resp.data ?? []).length;
-  } catch (err) {
-    console.warn("[smartmeter] countSmartMeterReadingsForPatient failed:", err);
-    return -1; // -1 = API failed, caller should use fallback
+  } catch (err: any) {
+    // 500 from SmartMeter is expected when the patient doesn't exist in their system.
+    // Return -1 so the caller falls back to cached reading stats.
+    console.debug(`[smartmeter] readings count skipped for patient ${smPatientId}:`, err?.message ?? err);
+    return -1;
   }
 }
 
