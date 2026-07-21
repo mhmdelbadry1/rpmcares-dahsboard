@@ -314,10 +314,10 @@ function EnrollModal({
     if (!form.firstName.trim() || !form.lastName.trim()) { setError('First Name and Last Name are required.'); return; }
     if (!form.clinicId) { setError('Please select a clinic.'); return; }
     const dobIso = form.dob ? dobToIso(form.dob) : '';
-    if (form.system === 'smartmeter' && !dobIso) {
+    if ((form.system === 'smartmeter' || form.system === 'local') && !dobIso) {
       setError(form.dob
         ? 'Please enter a valid date of birth (month 1–12, day 1–31, 4-digit year).'
-        : 'Date of birth is required for SmartMeter enrollment — enter as MM/DD/YYYY.');
+        : 'Date of birth is required — enter as MM/DD/YYYY.');
       return;
     }
     setSubmitting(true);
@@ -361,7 +361,11 @@ function EnrollModal({
             <ScrollView contentContainerStyle={em.body} keyboardShouldPersistTaps="handled">
               <ESegment
                 label="System" required
-                options={[{ label: 'SmartMeter', value: 'smartmeter' }, { label: 'Tenovi', value: 'tenovi' }]}
+                options={[
+                  { label: 'SmartMeter',   value: 'smartmeter' },
+                  { label: 'Tenovi',       value: 'tenovi' },
+                  { label: 'Local System', value: 'local' },
+                ]}
                 value={form.system}
                 onChange={(v) => set('system', v as PatientSource)}
                 colors={colors}
@@ -398,7 +402,7 @@ function EnrollModal({
 
               <EField
                 label="Date of Birth"
-                required={form.system === 'smartmeter'}
+                required={form.system === 'smartmeter' || form.system === 'local'}
                 value={form.dob}
                 onChangeText={(v) => set('dob', formatDobInput(v))}
                 placeholder="MM/DD/YYYY"
@@ -415,10 +419,11 @@ function EnrollModal({
                 colors={colors}
               />
 
-              {form.system === 'smartmeter' && (
+              {(form.system === 'smartmeter' || form.system === 'local') && (
                 <>
                   <EField label="Insurance Type" value={form.insurance} onChangeText={(v) => set('insurance', v)} placeholder="e.g. Medicare, Medicaid, Private" colors={colors} />
                   <EField label="Primary Diagnosis" value={form.diagnosis} onChangeText={(v) => set('diagnosis', v)} placeholder="e.g. Hypertension" colors={colors} />
+                  <EField label="Ordering Physician" value={form.orderingPhysician} onChangeText={(v) => set('orderingPhysician', v)} placeholder="Dr. Name" colors={colors} />
                   <ESegment label="Language" options={[{ label: 'English', value: 'EN' }, { label: 'Spanish', value: 'ES' }, { label: 'Arabic', value: 'AR' }]} value={form.language} onChange={(v) => set('language', v as 'EN' | 'ES' | 'AR')} colors={colors} />
                 </>
               )}
@@ -502,6 +507,8 @@ function DeletePatientModal({
             <Text style={{ fontWeight: '700', color: colors.text }}>{patient?.full_name}</Text>
             {patient?.source === 'tenovi'
               ? ' will be removed from the dashboard and discharged in Tenovi.'
+              : patient?.source === 'local'
+              ? ' will be permanently removed from the system.'
               : ' will be removed from the dashboard and set to Inactive in SmartMeter.'
             }
           </Text>
@@ -592,7 +599,7 @@ function PatientCard({
             <View style={[cd.chip, { borderColor: colors.border }]}>
               <Activity size={9} color={colors.textSecondary} />
               <Text style={[cd.chipText, { color: colors.textSecondary }]}>
-                {patient.source === 'tenovi' ? 'Tenovi' : 'SmartMeter'}
+                {patient.source === 'tenovi' ? 'Tenovi' : patient.source === 'local' ? 'Local' : 'SmartMeter'}
               </Text>
             </View>
             {patient.insurance_payer ? (
@@ -616,9 +623,10 @@ function PatientCard({
 // ── Filter options ─────────────────────────────────────────────────────────
 
 const SOURCE_OPTS: { label: string; value: PatientSource | '' }[] = [
-  { label: 'All Systems',  value: '' },
-  { label: 'Tenovi',       value: 'tenovi' },
-  { label: 'SmartMeter',   value: 'smartmeter' },
+  { label: 'All Systems',    value: '' },
+  { label: 'Tenovi',         value: 'tenovi' },
+  { label: 'SmartMeter',     value: 'smartmeter' },
+  { label: 'Local System',   value: 'local' },
 ];
 const PROGRAM_OPTS: { label: string; value: PatientProgram | '' }[] = [
   { label: 'All Programs', value: '' },

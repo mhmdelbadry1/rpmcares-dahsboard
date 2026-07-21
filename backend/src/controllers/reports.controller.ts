@@ -1,6 +1,8 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
 import { countSmartMeterReadingsForPatient } from "../services/smartmeter";
+import { fetchReviewMinutesMap, minutesFromMap } from "../lib/review-minutes";
+import { normalizeInsurance } from "../services/billing-engine";
 
 // ── Constants ──────────────────────────────────────────────────────────────
 
@@ -82,7 +84,29 @@ function buildCategories(
 
 export async function getPatientReport(req: Request, res: Response): Promise<void> {
   const { patientId } = req.params as { patientId: string };
-  const period        = periodRange(req.query.month as string | undefined);
+  // ?cycleStart=YYYY-MM-DD targets a specific billing cycle; otherwise falls back to calendar month
+  const cycleStartParam = req.query.cycleStart as string | undefined;
+  const period          = periodRange(req.query.month as string | undefined);
+
+  // When an exact cycle start is given, resolve its end date from billing_cycles
+  let rangeStart = period.start;
+  let rangeEnd   = period.end;
+  let exactCycleStart: string | null = null;
+  if (cycleStartParam && /^\d{4}-\d{2}-\d{2}$/.test(cycleStartParam)) {
+    exactCycleStart = cycleStartParam;
+    const { data: cycleRow } = await supabaseAdmin
+      .from("billing_cycles")
+      .select("cycle_start, cycle_end")
+      .eq("patient_id", patientId)
+      .eq("cycle_start", cycleStartParam)
+      .maybeSingle();
+    if (cycleRow) {
+      rangeStart = cycleRow.cycle_start;
+      rangeEnd   = cycleRow.cycle_end;
+    } else {
+      rangeStart = cycleStartParam;
+    }
+  }
 
   const [patientRes, notesRes, reviewTimesRes, billingRes, billingCyclesRes, cycleStatsRes, carePlanRes] =
     await Promise.all([
@@ -96,20 +120,20 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
         .select("*, profiles!care_notes_author_id_fkey(name)")
         .eq("patient_id", patientId)
         .neq("note_type", "care_plan")
-        .gte("dos", period.start)
-        .lte("dos", period.end)
+        .gte("dos", rangeStart)
+        .lte("dos", rangeEnd)
         .order("dos", { ascending: false }),
       supabaseAdmin
         .from("patient_review_times")
         .select("*")
         .eq("patient_id", patientId)
-        .gte("clock_start", period.start)
-        .lte("clock_start", `${period.end}T23:59:59`),
+        .gte("clock_start", rangeStart)
+        .lte("clock_start", `${rangeEnd}T23:59:59`),
       supabaseAdmin
         .from("billing_records")
         .select("*")
         .eq("patient_id", patientId)
-        .eq("cycle_start", period.start),
+        .eq("cycle_start", exactCycleStart ?? period.start),
       // Last 6 billing cycles for the cycle history section
       supabaseAdmin
         .from("billing_cycles")
@@ -117,12 +141,16 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
         .eq("patient_id", patientId)
         .order("cycle_start", { ascending: false })
         .limit(6),
-      // Fallback reading count from sync stats
+      // Fallback reading count — use range overlap so patients whose cycle
+      // doesn't start on the 1st still match their synced stat row
       supabaseAdmin
         .from("patient_cycle_stats")
         .select("reading_count, monitoring_days")
         .eq("patient_id", patientId)
-        .eq("cycle_start", period.start)
+        .lte("cycle_start", rangeEnd)
+        .gte("cycle_end", rangeStart)
+        .order("synced_at", { ascending: false })
+        .limit(1)
         .maybeSingle(),
       supabaseAdmin
         .from("care_notes")
@@ -192,7 +220,8 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
       program:          patient.program,
       diagnoses:        patient.diagnoses    ?? [],
       icd10_codes:      patient.icd10_codes  ?? [],
-      insurance_payer:  patient.insurance_payer ?? null,
+      insurance_payer:  patient.insurance_payer  ?? null,
+      insurance_type:   normalizeInsurance(patient.insurance_class ?? null, patient.insurance_payer ?? null),
       enrollment_status: patient.enrollment_status,
     },
     clinic: {
@@ -243,61 +272,77 @@ export async function getClinicReport(req: Request, res: Response): Promise<void
     return;
   }
 
-  // Step 1: clinic info + patients (needed to build patient_id list for review times)
-  const [clinicRes, patientsRes] = await Promise.all([
-    supabaseAdmin.from("clinics").select("id, name, specialty, location").eq("id", clinicId).single(),
-    supabaseAdmin.from("patients")
-      .select("id, full_name, dob, program, diagnoses, icd10_codes, insurance_payer, enrollment_status, mrn")
-      .eq("clinic_id", clinicId)
-      .eq("enrollment_status", "active"),
-  ]);
+  // Step 1: clinic info + patients (paginated — clinics can exceed 1000 active patients)
+  const clinicRes = await supabaseAdmin.from("clinics").select("id, name, specialty, location").eq("id", clinicId).single();
+  async function fetchClinicPatients(): Promise<any[]> {
+    const PAGE = 1000;
+    let all: any[] = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseAdmin.from("patients")
+        .select("id, full_name, dob, program, diagnoses, icd10_codes, insurance_payer, enrollment_status, mrn")
+        .eq("clinic_id", clinicId)
+        .eq("enrollment_status", "active")
+        .range(from, from + PAGE - 1);
+      if (error) throw error;
+      all = all.concat(data ?? []);
+      if ((data ?? []).length < PAGE) break;
+    }
+    return all;
+  }
 
   const clinic     = clinicRes.data as any;
-  const patients   = (patientsRes.data ?? []) as any[];
+  const patients   = await fetchClinicPatients();
   const patientIds = patients.map((p: any) => p.id);
 
-  // Step 2: billing records + review times (patient_review_times has no clinic_id — filter by patient_id)
-  const [recordsRes, reviewTimesRes] = await Promise.all([
-    supabaseAdmin.from("billing_records").select("*").eq("clinic_id", clinicId).eq("cycle_start", period.start),
-    patientIds.length > 0
-      ? supabaseAdmin
-          .from("patient_review_times")
-          .select("patient_id, duration_seconds")
-          .in("patient_id", patientIds)
-          .gte("clock_start", period.start)
-          .lte("clock_start", `${period.end}T23:59:59`)
-      : Promise.resolve({ data: [] }),
-  ]);
+  // Step 2: billing records (paginated) + review times
+  async function fetchClinicBillingRecords(): Promise<any[]> {
+    const PAGE = 1000;
+    let all: any[] = [];
+    for (let from = 0; ; from += PAGE) {
+      const { data, error } = await supabaseAdmin.from("billing_records").select("*")
+        .eq("clinic_id", clinicId)
+        .lte("cycle_start", period.end)
+        .gte("cycle_end",   period.start)
+        .range(from, from + PAGE - 1);
+      if (error) throw error;
+      all = all.concat(data ?? []);
+      if ((data ?? []).length < PAGE) break;
+    }
+    return all;
+  }
 
-  const records    = (recordsRes.data ?? []) as any[];
-  const timeLogs:  any[] = []; // timer removed — only review times used
-  const reviews    = (reviewTimesRes.data ?? []) as any[];
+  const records = await fetchClinicBillingRecords();
+
+  // Live-compute minutes across the full span of all billing cycle dates.
+  let clinicRtMap = new Map<string, Array<{ date: string; secs: number }>>();
+  if (records.length > 0) {
+    const allStarts = records.map((r: any) => r.cycle_start as string).filter(Boolean);
+    const allEnds   = records.map((r: any) => r.cycle_end   as string).filter(Boolean);
+    const rangeMin  = allStarts.length > 0 ? allStarts.reduce((a, b) => (a < b ? a : b)) : period.start;
+    const rangeMax  = allEnds.length   > 0 ? allEnds.reduce((a, b) => (a > b ? a : b))   : period.end;
+    clinicRtMap = await fetchReviewMinutesMap(patientIds, rangeMin, rangeMax);
+  }
 
   // Per-patient summary
   const patientSummaries = patients.map((p) => {
-    const ptRecords = records.filter((r) => r.patient_id === p.id);
-    const ptLogs    = timeLogs.filter((l) => l.patient_id === p.id);
-    const ptReviews = reviews.filter((r) => r.patient_id === p.id);
-
-    const totalMinutes = Math.round(
-      [...ptLogs, ...ptReviews].reduce((s: number, l: any) => s + (l.duration_seconds ?? 0), 0) / 60,
-    );
-    const totalReadings = ptRecords.reduce((s: number, r: any) => s + (r.reading_count ?? 0), 0);
-    const cptCodes      = [...new Set(ptRecords.map((r: any) => r.cpt_code))];
+    const ptRecords  = records.filter((r: any) => r.patient_id === p.id);
+    const cycleStart = ptRecords[0]?.cycle_start ?? period.start;
+    const cycleEnd   = ptRecords[0]?.cycle_end   ?? period.end;
+    const totalMinutes   = minutesFromMap(clinicRtMap, p.id, cycleStart, cycleEnd);
+    const totalReadings  = ptRecords.length > 0
+      ? Math.max(...ptRecords.map((r: any) => r.reading_count ?? 0))
+      : 0;
+    const cptCodes       = [...new Set(ptRecords.map((r: any) => r.cpt_code))];
     const totalProjected = ptRecords.reduce((s: number, r: any) => s + parseFloat(r.projected_amount ?? "0"), 0);
+    const insuranceType  = ptRecords[0]?.insurance_type ?? null;
 
     const byProgram = PROGRAM_CATEGORIES.map((cat) => {
-      const progLogs    = ptLogs.filter((l) => l.program === cat.program);
-      const progReviews = cat.program === "RPM" ? ptReviews : [];
-      const mins        = Math.round(
-        [...progLogs, ...progReviews].reduce((s: number, l: any) => s + (l.duration_seconds ?? 0), 0) / 60,
-      );
-      const progRecords = ptRecords.filter((r) => (cat.cptCodes as readonly string[]).includes(r.cpt_code));
+      const progRecords = ptRecords.filter((r: any) => (cat.cptCodes as readonly string[]).includes(r.cpt_code));
       const readings    = progRecords.reduce((s: number, r: any) => s + (r.reading_count ?? 0), 0);
-      const thresholdMet = mins >= cat.thresholdMinutes;
+      const thresholdMet = totalMinutes >= cat.thresholdMinutes;
       return {
         program: cat.program, cptCodes: progRecords.map((r: any) => r.cpt_code),
-        minutes: mins, readings, thresholdMet,
+        minutes: totalMinutes, readings, thresholdMet,
         billingStatus: progRecords[0]?.status ?? null,
         projectedAmount: progRecords.reduce((s: number, r: any) => s + parseFloat(r.projected_amount ?? "0"), 0),
       };
@@ -312,6 +357,9 @@ export async function getClinicReport(req: Request, res: Response): Promise<void
       diagnoses:        p.diagnoses    ?? [],
       icd10_codes:      p.icd10_codes  ?? [],
       insurance_payer:  p.insurance_payer ?? null,
+      insurance_type:   insuranceType,
+      cycle_start:      cycleStart ?? null,
+      cycle_end:        cycleEnd   ?? null,
       totalMinutes,
       totalReadings,
       cptCodes,
@@ -353,51 +401,71 @@ export async function getMonthlyReport(req: Request, res: Response): Promise<voi
   const period   = periodRange(req.query.month as string | undefined);
   const clinicId = req.query.clinicId as string | undefined;
 
-  let recordsQ = supabaseAdmin
-    .from("billing_records")
-    .select("*, patients(full_name, dob, program, diagnoses, icd10_codes, insurance_payer, mrn, clinic_id, clinics(name))")
-    .eq("cycle_start", period.start)
-    .order("clinic_id")
-    .order("patient_id")
-    .order("cpt_code");
-
-  if (profile.role !== "super_admin" && profile.clinic_id) {
-    recordsQ = recordsQ.eq("clinic_id", profile.clinic_id);
-  } else if (clinicId) {
-    recordsQ = recordsQ.eq("clinic_id", clinicId);
+  function buildRecordsQuery(from: number, to: number) {
+    let q = supabaseAdmin
+      .from("billing_records")
+      .select("*, patients(full_name, dob, program, diagnoses, icd10_codes, insurance_payer, mrn, clinic_id, clinics(name))")
+      .lte("cycle_start", period.end)
+      .gte("cycle_end",   period.start)
+      .order("clinic_id")
+      .order("patient_id")
+      .order("cpt_code")
+      .range(from, to);
+    if (profile.role !== "super_admin" && profile.clinic_id) q = q.eq("clinic_id", profile.clinic_id);
+    else if (clinicId) q = q.eq("clinic_id", clinicId);
+    return q;
   }
 
-  const { data: rawRecords, error } = await recordsQ;
-  if (error) {
-    res.status(502).json({ error: error.message });
-    return;
+  // Paginate to bypass Supabase's 1000-row server cap
+  const PAGE = 1000;
+  let rawRecords: any[] = [];
+  for (let from = 0; ; from += PAGE) {
+    const { data, error } = await buildRecordsQuery(from, from + PAGE - 1);
+    if (error) { res.status(502).json({ error: error.message }); return; }
+    rawRecords = rawRecords.concat(data ?? []);
+    if ((data ?? []).length < PAGE) break;
   }
 
-  const records = (rawRecords ?? []).map((r: any) => {
+  // Live-compute minutes using the same approach as the billing queue:
+  // span the full date range of all billing cycles so no time logs fall outside the fetch window.
+  let reportRtMap = new Map<string, Array<{ date: string; secs: number }>>();
+  if (rawRecords.length > 0) {
+    const reportPatientIds = [...new Set(rawRecords.map((r: any) => r.patient_id as string))];
+    const allStarts = rawRecords.map((r: any) => r.cycle_start as string).filter(Boolean);
+    const allEnds   = rawRecords.map((r: any) => r.cycle_end   as string).filter(Boolean);
+    const rangeMin  = allStarts.length > 0 ? allStarts.reduce((a, b) => (a < b ? a : b)) : period.start;
+    const rangeMax  = allEnds.length   > 0 ? allEnds.reduce((a, b) => (a > b ? a : b))   : period.end;
+    reportRtMap = await fetchReviewMinutesMap(reportPatientIds, rangeMin, rangeMax);
+  }
+
+  const records = rawRecords.map((r: any) => {
     const pat    = Array.isArray(r.patients) ? r.patients[0] : r.patients;
     const clinic = pat ? (Array.isArray(pat.clinics) ? pat.clinics[0] : pat.clinics) : null;
+    const liveMinutes = minutesFromMap(reportRtMap, r.patient_id, r.cycle_start, r.cycle_end ?? r.cycle_start);
     return {
-      id:              r.id,
-      patient_id:      r.patient_id,
-      patient_name:    pat?.full_name         ?? null,
-      patient_dob:     pat?.dob               ?? null,
-      patient_mrn:     pat?.mrn               ?? null,
-      patient_program: pat?.program           ?? null,
-      diagnoses:       pat?.diagnoses         ?? [],
-      icd10_codes:     pat?.icd10_codes       ?? [],
-      insurance_payer: pat?.insurance_payer   ?? null,
-      clinic_id:       r.clinic_id,
-      clinic_name:     clinic?.name           ?? null,
-      cpt_code:        r.cpt_code,
-      units:           r.units,
-      dos:             r.dos,
-      program:         r.program,
-      status:          r.status,
-      reading_count:   r.reading_count        ?? 0,
-      total_minutes:   r.total_minutes        ?? 0,
-      projected_amount: r.projected_amount    ? parseFloat(r.projected_amount)  : null,
-      actual_amount:   r.actual_amount        ? parseFloat(r.actual_amount)     : null,
-      cycle_start:     r.cycle_start,
+      id:               r.id,
+      patient_id:       r.patient_id,
+      patient_name:     pat?.full_name         ?? null,
+      patient_dob:      pat?.dob               ?? null,
+      patient_mrn:      pat?.mrn               ?? null,
+      patient_program:  pat?.program           ?? null,
+      diagnoses:        pat?.diagnoses         ?? [],
+      icd10_codes:      pat?.icd10_codes       ?? [],
+      insurance_payer:  pat?.insurance_payer   ?? null,
+      insurance_type:   r.insurance_type       ?? null,
+      clinic_id:        r.clinic_id,
+      clinic_name:      clinic?.name           ?? null,
+      cpt_code:         r.cpt_code,
+      units:            r.units,
+      dos:              r.dos,
+      program:          r.program,
+      status:           r.status,
+      reading_count:    r.reading_count        ?? 0,
+      total_minutes:    liveMinutes,
+      projected_amount: r.projected_amount     ? parseFloat(r.projected_amount) : null,
+      actual_amount:    r.actual_amount        ? parseFloat(r.actual_amount)    : null,
+      cycle_start:      r.cycle_start,
+      cycle_end:        r.cycle_end            ?? null,
     };
   });
 
@@ -438,4 +506,19 @@ export async function getMonthlyReport(req: Request, res: Response): Promise<voi
                           .sort((a, b) => b.projected - a.projected),
     },
   });
+}
+
+// ── 4. Exported Billing Reports (per-patient index) ────────────────────────
+
+export async function getExportedBillingReports(req: Request, res: Response): Promise<void> {
+  const { patientId } = req.params as { patientId: string };
+
+  const { data, error } = await supabaseAdmin
+    .from("exported_billing_reports")
+    .select("id, patient_id, clinic_id, cycle_start, cycle_end, generated_at, created_at")
+    .eq("patient_id", patientId)
+    .order("cycle_start", { ascending: false });
+
+  if (error) { res.status(502).json({ error: error.message }); return; }
+  res.json({ reports: data ?? [] });
 }

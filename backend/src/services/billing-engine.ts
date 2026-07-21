@@ -108,19 +108,67 @@ export async function evaluatePatientBilling(patientId: string): Promise<void> {
   const insuranceType        = normalizeInsurance(patient.insurance_class, patient.insurance_payer);
   const applicableCategories = PROGRAM_RULE_MAP[patient.program] ?? [];
 
-  // Determine current billing cycle
-  const { data: cycleRow } = await supabaseAdmin
+  // ── Determine (and auto-advance) billing cycle ────────────────────────────
+  const { data: latestCycle } = await supabaseAdmin
     .from("billing_cycles")
-    .select("cycle_start, shipment_date")
+    .select("id, cycle_start, cycle_end, cycle_no, shipment_date, consent_date")
     .eq("patient_id", patientId)
     .order("cycle_start", { ascending: false })
     .limit(1)
     .maybeSingle();
 
+  const now = new Date();
+  let cycleRow = latestCycle as any;
+
+  // Auto-advance: if the current cycle has ended, create the next one
+  if (cycleRow?.cycle_end) {
+    const [ey, em, ed] = (cycleRow.cycle_end as string).split("-").map(Number);
+    const cycleEndDt = new Date(ey, em - 1, ed, 0, 0, 0, 0);
+    if (now > cycleEndDt) {
+      // Next cycle starts the day after the current cycle ends
+      const nextStart = new Date(ey, em - 1, ed + 1, 0, 0, 0, 0);
+      const nextEnd   = new Date(ey, em - 1, ed + 30, 0, 0, 0, 0); // 29-day window
+      const fmt = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
+      const prevNo = cycleRow.cycle_no ?? "C0";
+      const prevNum = parseInt(prevNo.replace(/\D/g, ""), 10) || 0;
+      const nextNo  = `C${prevNum + 1}`;
+
+      const { data: newCycle } = await supabaseAdmin
+        .from("billing_cycles")
+        .upsert(
+          {
+            patient_id:    patientId,
+            cycle_start:   fmt(nextStart),
+            cycle_end:     fmt(nextEnd),
+            cycle_no:      nextNo,
+            shipment_date: cycleRow.shipment_date ?? null,  // carry over shipment date
+            consent_date:  cycleRow.consent_date  ?? null,
+            updated_at:    now.toISOString(),
+          },
+          { onConflict: "patient_id,cycle_start" },
+        )
+        .select()
+        .maybeSingle();
+
+      if (newCycle) {
+        console.log(`[billing] Auto-advanced cycle for patient ${patientId}: ${prevNo} → ${nextNo}`);
+        // Save an export record for the cycle that just ended
+        await supabaseAdmin.from("exported_billing_reports").insert({
+          patient_id:  patientId,
+          clinic_id:   patient.clinic_id,
+          cycle_start: cycleRow.cycle_start,
+          cycle_end:   cycleRow.cycle_end,
+        }).select().maybeSingle();
+        cycleRow = newCycle;
+      }
+    }
+  }
+
   // Build the cycle start string directly — never convert through toISOString()
   // because new Date("YYYY-MM-DD") is UTC midnight, and setHours(local) then
   // toISOString() shifts the date backwards in UTC+ timezones.
-  const now = new Date();
   const defaultCycleStart = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-01`;
   const cycleStartStr = cycleRow?.cycle_start ?? defaultCycleStart;
 
@@ -128,32 +176,48 @@ export async function evaluatePatientBilling(patientId: string): Promise<void> {
   const [csY, csM, csD] = cycleStartStr.split("-").map(Number);
   const cycleStartDate = new Date(csY, csM - 1, csD, 0, 0, 0, 0);
 
-  const cycleEndDate = new Date(csY, csM - 1, csD + 30, 0, 0, 0, 0);
-  const cycleEndStr  = `${cycleEndDate.getFullYear()}-${String(cycleEndDate.getMonth() + 1).padStart(2, "0")}-${String(cycleEndDate.getDate()).padStart(2, "0")}`;
+  // Cycle end: use stored value if available, else start + 29 days (matches sheet formula)
+  const cycleEndDate = cycleRow?.cycle_end
+    ? (() => { const [ey, em, ed] = (cycleRow.cycle_end as string).split("-").map(Number); return new Date(ey, em - 1, ed); })()
+    : new Date(csY, csM - 1, csD + 29, 0, 0, 0, 0);
+  const cycleEndStr = `${cycleEndDate.getFullYear()}-${String(cycleEndDate.getMonth() + 1).padStart(2, "0")}-${String(cycleEndDate.getDate()).padStart(2, "0")}`;
 
   const shipmentDate = cycleRow?.shipment_date ? (() => {
-    const [sy, sm, sd] = cycleRow.shipment_date.split("-").map(Number);
+    const [sy, sm, sd] = (cycleRow.shipment_date as string).split("-").map(Number);
     return new Date(sy, sm - 1, sd);
   })() : null;
 
-  // Reading count for this cycle
+  // Reading count for this cycle — use overlap query so patients whose billing
+  // cycle doesn't start on the 1st of the month still get matched to the sync's
+  // monthly stats (sync always stores cycle_start = first day of month).
   const { data: stats } = await supabaseAdmin
     .from("patient_cycle_stats")
-    .select("reading_count")
+    .select("reading_count, monitoring_days")
     .eq("patient_id", patientId)
-    .eq("cycle_start", cycleStartStr)
+    .lte("cycle_start", cycleEndStr)
+    .gte("cycle_end", cycleStartStr)
+    .order("synced_at", { ascending: false })
+    .limit(1)
     .maybeSingle();
   const readingCount = stats?.reading_count ?? 0;
 
-  // Total clinical time for this cycle
-  const { data: timeLogs } = await supabaseAdmin
-    .from("time_logs")
-    .select("duration_seconds")
-    .eq("patient_id", patientId)
-    .gte("logged_at", cycleStartDate.toISOString())
-    .lt("logged_at", cycleEndDate.toISOString());
+  // Total clinical time = manual staff logs (time_logs) + SmartMeter review times
+  const [{ data: timeLogs }, { data: reviewTimes }] = await Promise.all([
+    supabaseAdmin
+      .from("time_logs")
+      .select("duration_seconds")
+      .eq("patient_id", patientId)
+      .gte("logged_at", cycleStartStr)
+      .lte("logged_at", `${cycleEndStr}T23:59:59`),
+    supabaseAdmin
+      .from("patient_review_times")
+      .select("duration_seconds")
+      .eq("patient_id", patientId)
+      .gte("clock_start", cycleStartStr)
+      .lte("clock_start", `${cycleEndStr}T23:59:59`),
+  ]);
   const totalMinutes = Math.floor(
-    (timeLogs ?? []).reduce((s, t) => s + t.duration_seconds, 0) / 60,
+    [...(timeLogs ?? []), ...(reviewTimes ?? [])].reduce((s, t) => s + t.duration_seconds, 0) / 60,
   );
 
   // Match applicable billing rules
@@ -203,6 +267,13 @@ export async function evaluatePatientBilling(patientId: string): Promise<void> {
   const updatedAt = new Date().toISOString();
   for (const [cptCode, { units, ruleCategory, isOneTime }] of cptMap) {
     if (isOneTime && alreadyBilledOneTime.has(cptCode)) continue;
+
+    // Block shipment-date CPTs (99453, 98975) when no shipment date is on record.
+    // Without a real date the DOS would be fabricated from cycle_start.
+    const dosOffsetEntry =
+      _dosMap.get(patient.program)?.get(cptCode) ??
+      _dosMap.get(ruleCategory)?.get(cptCode);
+    if (dosOffsetEntry?.offset_type === "shipment_date" && !shipmentDate) continue;
 
     const dos = calculateDOS(cptCode, patient.program, ruleCategory, cycleStartDate, shipmentDate);
     const projectedAmount = getProjectedAmount(cptCode, insuranceType);

@@ -239,21 +239,49 @@ export async function syncReadingCounts(clinics: ClinicRow[]): Promise<void> {
       if (!dbPatients || dbPatients.length === 0) continue;
 
       const idMap = new Map(dbPatients.map((p) => [p.external_patient_id, p.id]));
-      const statsRows = group.patients
-        .filter((p) => idMap.has(p.externalId))
-        .map((p) => ({
-          patient_id:      idMap.get(p.externalId)!,
-          cycle_start:     cycleStartStr,
-          cycle_end:       cycleEndStr,
-          reading_count:   p.readingCount,
-          monitoring_days: p.readingCount,
-          source:          "tenovi",
-          synced_at:       now.toISOString(),
-        }));
+      const matched = group.patients.filter((p) => idMap.has(p.externalId));
+
+      const statsRows = matched.map((p) => ({
+        patient_id:      idMap.get(p.externalId)!,
+        cycle_start:     cycleStartStr,
+        cycle_end:       cycleEndStr,
+        reading_count:   p.readingCount,
+        monitoring_days: p.readingCount,
+        source:          "tenovi",
+        synced_at:       now.toISOString(),
+      }));
 
       if (statsRows.length === 0) continue;
       await upsertPatientCycleStats(statsRows);
-      console.log(`[sync:billing] Tenovi ${group.facilityName}: ${statsRows.length} reading stats updated`);
+
+      // Save Tenovi's monthly review time into patient_review_times so billing
+      // and report queries pick it up alongside manual time_logs entries.
+      const reviewPatientIds = matched
+        .filter((p) => p.reviewSeconds > 0)
+        .map((p) => idMap.get(p.externalId)!);
+
+      if (reviewPatientIds.length > 0) {
+        // Delete stale Tenovi sync records for this cycle before re-inserting
+        await supabaseAdmin
+          .from("patient_review_times")
+          .delete()
+          .in("patient_id", reviewPatientIds)
+          .eq("source", "tenovi_sync");
+
+        const reviewRows = matched
+          .filter((p) => p.reviewSeconds > 0)
+          .map((p) => ({
+            patient_id:       idMap.get(p.externalId)!,
+            clock_start:      `${cycleStartStr}T00:00:00+00:00`,
+            duration_seconds: p.reviewSeconds,
+            source:           "tenovi_sync",
+            synced_at:        now.toISOString(),
+          }));
+
+        await supabaseAdmin.from("patient_review_times").insert(reviewRows);
+      }
+
+      console.log(`[sync:billing] Tenovi ${group.facilityName}: ${statsRows.length} reading stats, ${reviewPatientIds.length} review times updated`);
     }
   } catch (err) {
     console.warn("[sync:billing] Tenovi reading sync failed:", err);

@@ -130,7 +130,7 @@ export type AlertEvent = {
   created_at: string;
 };
 
-export type PatientSource  = 'tenovi' | 'smartmeter';
+export type PatientSource  = 'tenovi' | 'smartmeter' | 'local';
 export type PatientProgram = 'RPM' | 'RTM' | 'CCM' | 'PCM';
 
 export type SmartMeterAddress = {
@@ -193,6 +193,7 @@ export type Patient = {
   created_at: string;
   updated_at: string;
   profile_extras: Record<string, string>;
+  current_cycle: { cycle_start: string; cycle_end: string } | null;
 };
 
 export type ReadingType =
@@ -512,7 +513,7 @@ export type PatientReport = {
   patient: {
     id: string; full_name: string; dob: string | null; mrn: string | null;
     program: string | null; diagnoses: string[]; icd10_codes: string[];
-    insurance_payer: string | null; enrollment_status: string | null;
+    insurance_payer: string | null; insurance_type: string | null; enrollment_status: string | null;
   };
   clinic: { name: string | null; specialty: string | null; location: string | null };
   period: { start: string; end: string; label: string };
@@ -529,7 +530,8 @@ export type PatientReport = {
 export type ClinicPatientSummary = {
   patient_id: string; full_name: string; dob: string | null; mrn: string | null;
   program: string | null; diagnoses: string[]; icd10_codes: string[];
-  insurance_payer: string | null;
+  insurance_payer: string | null; insurance_type: string | null;
+  cycle_start: string | null; cycle_end: string | null;
   totalMinutes: number; totalReadings: number; cptCodes: string[];
   totalProjected: number;
   byProgram: Array<{
@@ -554,10 +556,12 @@ export type MonthlyReportRecord = {
   id: string; patient_id: string; patient_name: string | null; patient_dob: string | null;
   patient_mrn: string | null; patient_program: string | null;
   diagnoses: string[]; icd10_codes: string[]; insurance_payer: string | null;
+  insurance_type: string | null;
   clinic_id: string; clinic_name: string | null;
   cpt_code: string; units: number | null; dos: string | null;
   program: string | null; status: string; reading_count: number; total_minutes: number;
-  projected_amount: number | null; actual_amount: number | null; cycle_start: string;
+  projected_amount: number | null; actual_amount: number | null;
+  cycle_start: string; cycle_end: string | null;
 };
 
 export type MonthlyBillingReport = {
@@ -573,6 +577,16 @@ export type MonthlyBillingReport = {
     totalReadings: number;
     byCpt: Array<{ cpt_code: string; count: number; projected: number }>;
   };
+};
+
+export type ExportedBillingReport = {
+  id: string;
+  patient_id: string;
+  clinic_id: string | null;
+  cycle_start: string;
+  cycle_end: string;
+  generated_at: string;
+  created_at: string;
 };
 
 export class ApiError extends Error {
@@ -790,7 +804,7 @@ export const api = {
           Object.entries(filters).filter(([, v]) => v != null && v !== '') as [string, string][]
         ).toString()
       : '';
-    return request<{ records: BillingRecord[]; count: number }>(`/api/billing/queue${qs}`, { method: 'GET' }, token);
+    return request<{ records: BillingRecord[]; count: number; totalCount: number }>(`/api/billing/queue${qs}`, { method: 'GET' }, token);
   },
   updateBillingRecord: (
     token: string,
@@ -932,6 +946,10 @@ export const api = {
   // ── Reports ──────────────────────────────────────────────────────────────
   getPatientReport: (token: string, patientId: string, month?: string) =>
     request<PatientReport>(`/api/reports/patient/${patientId}${month ? `?month=${month}` : ''}`, { method: 'GET' }, token),
+  getPatientReportByCycle: (token: string, patientId: string, cycleStart: string) =>
+    request<PatientReport>(`/api/reports/patient/${patientId}?cycleStart=${cycleStart}`, { method: 'GET' }, token),
+  getExportedBillingReports: (token: string, patientId: string) =>
+    request<{ reports: ExportedBillingReport[] }>(`/api/reports/patient/${patientId}/exported`, { method: 'GET' }, token),
   getClinicReport: (token: string, clinicId: string, month?: string) =>
     request<ClinicReport>(`/api/reports/clinic/${clinicId}${month ? `?month=${month}` : ''}`, { method: 'GET' }, token),
   getMonthlyReport: (token: string, month?: string, clinicId?: string) => {

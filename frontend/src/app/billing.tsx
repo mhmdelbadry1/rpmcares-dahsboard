@@ -1,11 +1,11 @@
 import {
   AlertCircle, BookOpen, Building2, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight,
-  Clock, Download, DollarSign, FileText, RefreshCw, Settings, Sliders, Trash2,
+  Clock, Download, DollarSign, FileText, RefreshCw, Search, Settings, Sliders, Trash2,
   TrendingUp, Users, Zap,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ActivityIndicator, Modal, Pressable, ScrollView,
+  ActivityIndicator, Modal, Platform, Pressable, ScrollView,
   StyleSheet, Text, TextInput, View, useWindowDimensions,
 } from 'react-native';
 import { Card } from '@/components/ui/card';
@@ -23,6 +23,7 @@ import {
   type DosOffsetItem, type RevenueBreakdown,
   type MonthlyBillingReport, type ClinicReport, type Clinic,
 } from '@/lib/api';
+import { openReportForDownload } from '@/lib/pdf-utils';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -56,7 +57,7 @@ function currentMonth(): string {
 
 // ── Main screen ────────────────────────────────────────────────────────────
 
-type Tab = 'queue' | 'revenue' | 'report' | 'clinic' | 'admin';
+type Tab = 'queue' | 'revenue' | 'clinic' | 'admin';
 
 export default function BillingScreen() {
   const colors  = useTheme();
@@ -69,7 +70,6 @@ export default function BillingScreen() {
   const tabs: { key: Tab; label: string; icon: typeof FileText }[] = [
     { key: 'queue',   label: 'Queue',   icon: FileText },
     { key: 'revenue', label: 'Revenue', icon: TrendingUp },
-    { key: 'report',  label: 'Report',  icon: Download },
     { key: 'clinic',  label: 'Clinic',  icon: Building2 },
     ...(isSuperAdmin ? [{ key: 'admin' as Tab, label: 'Admin', icon: Settings }] : []),
   ];
@@ -102,7 +102,6 @@ export default function BillingScreen() {
 
       {tab === 'queue'   && <QueueTab   session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
       {tab === 'revenue' && <RevenueTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
-      {tab === 'report'  && <MonthlyReportTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
       {tab === 'clinic'  && <ClinicSummaryTab session={session} colors={colors} isSuperAdmin={isSuperAdmin} />}
       {tab === 'admin'   && isSuperAdmin && <AdminTab session={session} colors={colors} />}
     </View>
@@ -116,27 +115,29 @@ export default function BillingScreen() {
 function QueueTab({ session, colors, isSuperAdmin }: {
   session: any; colors: ReturnType<typeof useTheme>; isSuperAdmin: boolean;
 }) {
-  const [records, setRecords]   = useState<BillingRecord[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState('');
-  const [month, setMonth]       = useState(currentMonth());
-  const [program, setProgram]   = useState('');
-  const [status, setStatus]     = useState('');
+  const [records, setRecords]     = useState<BillingRecord[]>([]);
+  const [totalCount, setTotal]    = useState(0);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState('');
+  const [month, setMonth]         = useState(currentMonth());
+  const [program, setProgram]     = useState('');
+  const [search, setSearch]       = useState('');
   const [evaluating, setEvaluating] = useState(false);
-  const [patchingId, setPatchingId] = useState<string | null>(null);
+  const [exporting, setExporting]   = useState(false);
 
   const load = useCallback(async () => {
     if (!session) return;
     setLoading(true); setError('');
     try {
-      const data = await api.getBillingQueue(session.token, { month, program: program || undefined, status: status || undefined });
+      const data = await api.getBillingQueue(session.token, { month, program: program || undefined });
       setRecords(data.records);
+      setTotal(data.totalCount ?? data.count);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load billing queue.');
     } finally {
       setLoading(false);
     }
-  }, [session, month, program, status]);
+  }, [session, month, program]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -149,44 +150,179 @@ function QueueTab({ session, colors, isSuperAdmin }: {
     } catch { } finally { setEvaluating(false); }
   }
 
-  async function handleStatusChange(id: string, newStatus: string) {
-    if (!session) return;
-    setPatchingId(id);
-    try {
-      const { record } = await api.updateBillingRecord(session.token, id, { status: newStatus });
-      setRecords(prev => prev.map(r => r.id === id ? { ...r, ...record } : r));
-    } catch { } finally { setPatchingId(null); }
-  }
+  const buildQueueHtml = (rows: BillingRecord[], mon: string): string => {
+    const esc = (s: string) => (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const monthLabel = new Date(mon + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+    const generatedStr = new Date().toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const totalProjected = rows.reduce((s, r) => s + (r.projected_amount ?? 0), 0);
 
-  // Summary cards
-  const pending   = records.filter(r => r.status === 'pending').length;
-  const reviewed  = records.filter(r => ['reviewed','generated'].includes(r.status)).length;
-  const submitted = records.filter(r => ['submitted','paid'].includes(r.status)).length;
+    // Group by clinic
+    const clinicMap = new Map<string, BillingRecord[]>();
+    for (const r of rows) {
+      const key = r.clinic_name ?? 'Unknown';
+      if (!clinicMap.has(key)) clinicMap.set(key, []);
+      clinicMap.get(key)!.push(r);
+    }
+
+    const clinicSections = [...clinicMap.entries()].map(([clinicName, clinicRows]) => {
+      const sub = clinicRows.reduce((s, r) => s + (r.projected_amount ?? 0), 0);
+      const patRows = clinicRows.map((r, i) => `
+        <tr class="${i % 2 === 1 ? 'alt' : ''}">
+          <td>${esc(r.patient_name ?? '—')}<br><span class="sub">ID: ${esc(r.patient_id?.slice(0, 8) ?? '—')}</span></td>
+          <td>${esc(r.program ?? '—')}</td>
+          <td>${esc(r.insurance_type?.replace('Medicare Advantage', 'MA') ?? '—')}</td>
+          <td class="c">${esc(r.cpt_code)}</td>
+          <td class="c">${r.reading_count ?? '—'}</td>
+          <td class="c">${r.total_minutes ?? '—'}</td>
+          <td>${esc(r.cycle_start ?? '—')}${r.cycle_end ? `<br><span class="sub">${esc(r.cycle_end)}</span>` : ''}</td>
+          <td class="r">${r.projected_amount != null ? `$${r.projected_amount.toFixed(2)}` : '—'}</td>
+        </tr>`).join('');
+      return `
+        <div class="clinic-block">
+          <div class="clinic-heading">${esc(clinicName)}<span class="clinic-meta">${clinicRows.length} records &nbsp;&bull;&nbsp; $${sub.toFixed(2)} projected</span></div>
+          <table class="data">
+            <thead><tr>
+              <th>Patient</th><th>Program</th><th>Insurance</th>
+              <th class="c">CPT</th><th class="c">Readings</th><th class="c">Min</th>
+              <th>Cycle Date</th><th class="r">Projected</th>
+            </tr></thead>
+            <tbody>${patRows}</tbody>
+            <tfoot><tr>
+              <td colspan="7" class="subtotal-label">Clinic Subtotal</td>
+              <td class="r subtotal-val">$${sub.toFixed(2)}</td>
+            </tr></tfoot>
+          </table>
+        </div>`;
+    }).join('');
+
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; background: #fff; padding: 28px 32px; }
+  @media print { @page { size: A4 landscape; margin: 1.5cm 1.8cm; } body { padding: 0; } }
+  .doc-header { border-top: 3px solid #000; border-bottom: 1px solid #000; padding: 10px 0; margin-bottom: 18px; }
+  .doc-title { font-size: 14pt; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; }
+  .doc-meta { font-size: 8.5pt; margin-top: 3px; color: #444; }
+  .summary-box { border: 1px solid #000; padding: 8px 12px; margin-bottom: 18px; }
+  .summary-box table { width: 100%; border-collapse: collapse; }
+  .summary-box td { padding: 3px 8px; font-size: 9.5pt; border-right: 1px solid #bbb; text-align: center; width: 33%; }
+  .summary-box td:last-child { border-right: none; }
+  .summary-box .val { font-size: 13pt; font-weight: bold; display: block; }
+  .summary-box .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; color: #333; }
+  .section-title { font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 14px 0 6px; }
+  table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  table.data th { background: #000; color: #fff; padding: 4px 6px; text-align: left; font-weight: bold; font-size: 8pt; }
+  table.data th.c, table.data td.c { text-align: center; }
+  table.data th.r, table.data td.r { text-align: right; }
+  table.data td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  table.data tr.alt td { background: #f7f7f7; }
+  table.data tfoot td { border-top: 1px solid #000; border-bottom: none; }
+  .subtotal-label { font-weight: bold; }
+  .subtotal-val { font-weight: bold; }
+  .sub { font-size: 7.5pt; color: #555; }
+  .clinic-block { margin-bottom: 20px; page-break-inside: avoid; }
+  .clinic-heading { font-size: 10.5pt; font-weight: bold; margin-bottom: 4px; border-left: 3px solid #000; padding-left: 7px; }
+  .clinic-meta { font-size: 8pt; font-weight: normal; color: #555; margin-left: 10px; }
+  .grand-total { border-top: 2px solid #000; padding-top: 8px; font-size: 11pt; font-weight: bold; text-align: right; margin-top: 12px; }
+  .doc-footer { margin-top: 16px; border-top: 1px solid #000; padding-top: 6px; font-size: 7.5pt; color: #555; text-align: center; }
+</style>
+</head><body>
+<div class="doc-header">
+  <div class="doc-title">RPMCares &mdash; ${esc(monthLabel)} Billing Report</div>
+  <div class="doc-meta">Billing Period: <b>${esc(monthLabel)}</b> &nbsp;&nbsp; Generated: ${generatedStr}</div>
+</div>
+<div class="summary-box">
+  <table><tr>
+    <td><span class="val">${rows.length}</span><span class="lbl">Total Records</span></td>
+    <td><span class="val">${clinicMap.size}</span><span class="lbl">Clinics</span></td>
+    <td><span class="val">$${totalProjected.toFixed(2)}</span><span class="lbl">Projected Revenue</span></td>
+  </tr></table>
+</div>
+<div class="section-title">Billing Detail by Clinic</div>
+${clinicSections}
+<div class="grand-total">Grand Total Projected: $${totalProjected.toFixed(2)}</div>
+<div class="doc-footer">CONFIDENTIAL &mdash; For authorized billing review only. Not a clinical or legal record. &nbsp;|&nbsp; RPMCares &copy; ${new Date().getFullYear()}</div>
+</body></html>`;
+  };
+
+  const exportQueuePdf = async () => {
+    if (records.length === 0) return;
+    setExporting(true);
+    try {
+      const html = buildQueueHtml(records, month);
+      if (Platform.OS === 'web') {
+        openReportForDownload(html);
+      } else {
+        const Print   = await import('expo-print');
+        const Sharing = await import('expo-sharing');
+        const { uri } = await Print.printToFileAsync({ html, base64: false });
+        if (await Sharing.isAvailableAsync()) {
+          const label = new Date(month + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
+          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${label} Billing Report`, UTI: 'com.adobe.pdf' });
+        }
+      }
+    } catch (e: any) { console.warn('[billing] queue PDF failed:', e.message); }
+    finally { setExporting(false); }
+  };
+
+  // Client-side search filter
+  const q = search.trim().toLowerCase();
+  const filteredRecords = q
+    ? records.filter(r =>
+        r.patient_name?.toLowerCase().includes(q) ||
+        r.patient_id?.toLowerCase().startsWith(q) ||
+        r.clinic_name?.toLowerCase().includes(q)
+      )
+    : records;
+
   const projected = records.reduce((s, r) => s + (r.projected_amount ?? 0), 0);
 
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.content}>
       {/* KPI cards */}
       <View style={styles.kpiRow}>
-        <KpiCard label="Pending Review"  icon={Clock}        tone="warning" value={String(pending)}   sub="Need action" />
-        <KpiCard label="Ready to Submit" icon={CheckCircle2} tone="info"    value={String(reviewed)}  sub="Reviewed/signed" />
-        <KpiCard label="Submitted/Paid"  icon={DollarSign}   tone="success" value={String(submitted)} sub="This month" />
-        <KpiCard label="Projected"       icon={TrendingUp}   tone="primary" value={fmtK(projected)}   sub="This month" />
+        <KpiCard label="Projected Revenue" icon={TrendingUp} tone="primary" value={fmtK(projected)} sub="This month" />
+        <KpiCard label="Total Records"     icon={FileText}   tone="info"    value={String(totalCount || records.length)} sub="Billing entries" />
       </View>
 
       {/* Filter bar */}
       <Card>
-        <View style={styles.filterRow}>
-          <View style={styles.filterGroup}>
-            <Text style={[styles.filterLabel, { color: colors.textSecondary }]}>Month</Text>
-            <TextInput
-              value={month}
-              onChangeText={setMonth}
-              placeholder="YYYY-MM"
-              style={[styles.filterInput, { color: colors.text, borderColor: colors.border, backgroundColor: colors.surface }]}
-              placeholderTextColor={colors.textSecondary}
-            />
-          </View>
+        {/* Search bar */}
+        <View style={[styles.searchRow, { borderBottomColor: colors.border }]}>
+          <Search size={15} color={colors.textSecondary} />
+          <TextInput
+            value={search}
+            onChangeText={setSearch}
+            placeholder="Search by patient name or ID…"
+            placeholderTextColor={colors.textSecondary}
+            style={[styles.searchInput, { color: colors.text }]}
+            autoCorrect={false}
+            autoCapitalize="none"
+          />
+          {search.length > 0 && (
+            <Pressable onPress={() => setSearch('')} hitSlop={8}>
+              <Text style={{ color: colors.textSecondary, fontSize: 13, fontWeight: '600' }}>✕</Text>
+            </Pressable>
+          )}
+        </View>
+
+        {/* Month picker row */}
+        <View style={[styles.monthPickerRow, { borderBottomColor: colors.border }]}>
+          <Pressable onPress={() => setMonth(prevMonth(month))} style={styles.monthArrow}>
+            <ChevronLeft size={18} color={colors.primary} />
+          </Pressable>
+          <Text style={[styles.monthLabel, { color: colors.text }]}>
+            {new Date(month + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' })}
+          </Text>
+          <Pressable
+            onPress={() => setMonth(nextMonth(month))}
+            disabled={month >= currentMonth()}
+            style={[styles.monthArrow, month >= currentMonth() && { opacity: 0.3 }]}>
+            <ChevronRight size={18} color={colors.primary} />
+          </Pressable>
+        </View>
+
+        <View style={[styles.filterRow, { marginTop: 10 }]}>
           <View style={styles.filterGroup}>
             <Text style={[styles.filterLabel, { color: colors.textSecondary }]}>Program</Text>
             <FilterSelect
@@ -200,22 +336,7 @@ function QueueTab({ session, colors, isSuperAdmin }: {
               ]}
             />
           </View>
-          <View style={styles.filterGroup}>
-            <Text style={[styles.filterLabel, { color: colors.textSecondary }]}>Status</Text>
-            <FilterSelect
-              value={status} onChange={setStatus} colors={colors}
-              options={[
-                { label: 'All', value: '' },
-                { label: 'Pending', value: 'pending' },
-                { label: 'Generated', value: 'generated' },
-                { label: 'Reviewed', value: 'reviewed' },
-                { label: 'Signed', value: 'signed' },
-                { label: 'Submitted', value: 'submitted' },
-                { label: 'Paid', value: 'paid' },
-              ]}
-            />
-          </View>
-          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end' }}>
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'flex-end', flexWrap: 'wrap' }}>
             <Pressable
               onPress={load}
               style={[styles.actionBtn, { backgroundColor: colors.primary }]}>
@@ -233,6 +354,15 @@ function QueueTab({ session, colors, isSuperAdmin }: {
                 </Text>
               </Pressable>
             )}
+            <Pressable
+              onPress={exportQueuePdf}
+              disabled={exporting || records.length === 0}
+              style={[styles.actionBtn, { backgroundColor: colors.surface, borderColor: colors.primary, borderWidth: 1, opacity: (exporting || records.length === 0) ? 0.5 : 1 }]}>
+              <Download size={12} color={colors.primary} />
+              <Text style={[styles.actionBtnText, { color: colors.primary }]}>
+                {exporting ? 'Exporting…' : `${new Date(month + '-01').toLocaleString('en-US', { month: 'long' })} Report`}
+              </Text>
+            </Pressable>
           </View>
         </View>
       </Card>
@@ -250,15 +380,23 @@ function QueueTab({ session, colors, isSuperAdmin }: {
             </Text>
           </View>
         </Card>
+      ) : filteredRecords.length === 0 ? (
+        <Card>
+          <View style={styles.emptyBox}>
+            <Search size={24} color={colors.textSecondary} />
+            <Text style={[styles.emptyText, { color: colors.textSecondary }]}>
+              No results for "{search}"
+            </Text>
+          </View>
+        </Card>
       ) : (
         <BillingTable
-          records={records}
+          records={filteredRecords}
+          totalCount={q ? filteredRecords.length : (totalCount || records.length)}
           colors={colors}
-          isSuperAdmin={isSuperAdmin}
-          patchingId={patchingId}
           month={month}
-          projected={projected}
-          onStatusChange={handleStatusChange}
+          projected={filteredRecords.reduce((s, r) => s + (r.projected_amount ?? 0), 0)}
+          searchActive={q.length > 0}
         />
       )}
     </ScrollView>
@@ -267,19 +405,17 @@ function QueueTab({ session, colors, isSuperAdmin }: {
 
 // ── Billing Table (fills screen width — patient col stretches) ────────────
 
-const FIXED_COLS_W = 60 + 65 + 80 + 90 + 72 + 52 + 80 + 85 + 90; // all cols except Patient
+const FIXED_COLS_W = 60 + 65 + 80 + 90 + 72 + 52 + 80; // all cols except Patient
 
-function BillingTable({ records, colors, isSuperAdmin, patchingId, month, projected, onStatusChange }: {
+function BillingTable({ records, totalCount, colors, month, projected, searchActive }: {
   records: BillingRecord[];
+  totalCount: number;
   colors: ReturnType<typeof useTheme>;
-  isSuperAdmin: boolean;
-  patchingId: string | null;
   month: string;
   projected: number;
-  onStatusChange: (id: string, status: string) => void;
+  searchActive?: boolean;
 }) {
   const { width: screenWidth } = useWindowDimensions();
-  // Card has 16px margin each side + 16px body padding each side = 64px total offset
   const availableWidth = screenWidth - 64;
   const patientColW = Math.max(150, availableWidth - FIXED_COLS_W);
   const tableWidth  = patientColW + FIXED_COLS_W;
@@ -293,14 +429,16 @@ function BillingTable({ records, colors, isSuperAdmin, patchingId, month, projec
     { label: 'Readings',  w: 72, right: true },
     { label: 'Mins',      w: 52, right: true },
     { label: 'Projected', w: 80, right: true },
-    { label: 'Status',    w: 85  },
-    { label: '',          w: 90  },
   ];
 
   return (
     <ChartCard
       title={`Billing Queue — ${month}`}
-      subtitle={`${records.length} records · ${fmtK(projected)} projected`}>
+      subtitle={
+        searchActive
+          ? `${records.length} match${records.length !== 1 ? 'es' : ''} · ${fmtK(projected)} projected`
+          : `${totalCount || records.length} records · ${fmtK(projected)} projected`
+      }>
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={tableWidth > availableWidth}
@@ -326,7 +464,6 @@ function BillingTable({ records, colors, isSuperAdmin, patchingId, month, projec
                 styles.tableRow,
                 { width: Math.max(tableWidth, availableWidth) },
                 i > 0 && { borderTopColor: colors.border, borderTopWidth: StyleSheet.hairlineWidth },
-                patchingId === r.id && { opacity: 0.5 },
               ]}>
               <View style={{ width: patientColW }}>
                 <Text style={[styles.cellPrimary, { color: colors.text }]} numberOfLines={1}>{r.patient_name}</Text>
@@ -341,31 +478,6 @@ function BillingTable({ records, colors, isSuperAdmin, patchingId, month, projec
               <Text style={[styles.cellNum, { color: colors.text, width: 72, textAlign: 'right' }]}>{r.reading_count ?? '—'}</Text>
               <Text style={[styles.cellNum, { color: colors.text, width: 52, textAlign: 'right' }]}>{r.total_minutes ?? '—'}</Text>
               <Text style={[styles.cellBold,{ color: colors.text, width: 80, textAlign: 'right' }]}>{fmt$(r.projected_amount)}</Text>
-              <View style={{ width: 85 }}>
-                <StatusPill tone={STATUS_TONE[r.status] ?? 'muted'}>{r.status}</StatusPill>
-              </View>
-              <View style={{ width: 90, alignItems: 'flex-end', gap: 4 }}>
-                {r.status === 'pending' && (
-                  <Pressable onPress={() => onStatusChange(r.id, 'reviewed')} style={[styles.miniBtn, { borderColor: colors.border }]}>
-                    <Text style={[styles.miniBtnText, { color: colors.primary }]}>Review</Text>
-                  </Pressable>
-                )}
-                {r.status === 'reviewed' && (
-                  <Pressable onPress={() => onStatusChange(r.id, 'submitted')} style={[styles.miniBtn, { borderColor: colors.border }]}>
-                    <Text style={[styles.miniBtnText, { color: colors.success }]}>Submit</Text>
-                  </Pressable>
-                )}
-                {r.status === 'submitted' && isSuperAdmin && (
-                  <Pressable onPress={() => onStatusChange(r.id, 'paid')} style={[styles.miniBtn, { borderColor: colors.border }]}>
-                    <Text style={[styles.miniBtnText, { color: colors.success }]}>Paid</Text>
-                  </Pressable>
-                )}
-                {isSuperAdmin && r.status !== 'pending' && r.status !== 'voided' && (
-                  <Pressable onPress={() => onStatusChange(r.id, 'pending')} style={[styles.miniBtn, { borderColor: colors.warning }]}>
-                    <Text style={[styles.miniBtnText, { color: colors.warning }]}>↩ Undo</Text>
-                  </Pressable>
-                )}
-              </View>
             </View>
           ))}
         </View>
@@ -988,73 +1100,130 @@ function MonthlyReportTab({ session, colors, isSuperAdmin }: { session: any; col
 
   const buildMonthlyHtml = (r: MonthlyBillingReport): string => {
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const generatedStr = new Date(r.generatedAt).toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const byCptRows = r.totals.byCpt.map((c) =>
+      `<tr><td>${esc(c.cpt_code)}</td><td class="c">${c.count}</td><td class="r">$${c.projected.toFixed(2)}</td></tr>`
+    ).join('');
     const clinicSections = r.clinics.map((c) => {
-      const rows = c.records.map((rec) => `
-        <tr>
-          <td>${esc(rec.patient_name ?? '—')}<br><span style="font-size:9px">MRN: ${esc(rec.patient_mrn ?? '—')}</span></td>
+      const rows = c.records.map((rec, i) => `
+        <tr class="${i % 2 === 1 ? 'alt' : ''}">
+          <td>${esc(rec.patient_name ?? '—')}<br><span class="sub">MRN: ${esc(rec.patient_mrn ?? '—')}</span></td>
           <td>${esc(rec.patient_program ?? '—')}</td>
-          <td>${esc(rec.insurance_payer ?? '—')}</td>
-          <td>${esc(rec.cpt_code)}</td>
-          <td style="text-align:center">${rec.reading_count}</td>
-          <td style="text-align:center">${rec.total_minutes} min</td>
-          <td>${esc(rec.status)}</td>
-          <td style="text-align:right">${rec.projected_amount != null ? `$${rec.projected_amount.toFixed(2)}` : '—'}</td>
+          <td>${esc(rec.insurance_type ?? rec.insurance_payer ?? '—')}</td>
+          <td class="c">${esc(rec.cpt_code)}</td>
+          <td class="c">${rec.reading_count}</td>
+          <td class="c">${rec.total_minutes}</td>
+          <td>${esc(rec.cycle_start ?? '—')}${rec.cycle_end ? `<br><span class="sub">${esc(rec.cycle_end)}</span>` : ''}</td>
+          <td class="r">${rec.projected_amount != null ? `$${rec.projected_amount.toFixed(2)}` : '—'}</td>
         </tr>`).join('');
       return `
-        <div style="margin-bottom:16px">
-          <b style="font-size:12px">${esc(c.clinic_name)}</b>
-          <span style="margin-left:12px;font-size:10px">${c.records.length} records · ${c.readingCount} readings · $${c.subtotalProjected.toFixed(2)} projected</span>
-          <table style="margin-top:4px">
+        <div class="clinic-block">
+          <div class="clinic-heading">${esc(c.clinic_name)}<span class="clinic-meta">${c.records.length} records &nbsp;&bull;&nbsp; ${c.readingCount} readings &nbsp;&bull;&nbsp; $${c.subtotalProjected.toFixed(2)} projected</span></div>
+          <table class="data">
             <thead><tr>
-              <th>Patient (MRN)</th><th>Program</th><th>Insurance</th><th>CPT</th>
-              <th>Readings</th><th>Min</th><th>Status</th><th>Projected</th>
+              <th>Patient Name &nbsp; MRN</th>
+              <th>Program</th><th>Insurance Type</th>
+              <th class="c">CPT</th><th class="c">Readings</th><th class="c">Min</th>
+              <th>Cycle Date</th>
+              <th class="r">Projected</th>
             </tr></thead>
             <tbody>${rows}</tbody>
             <tfoot><tr>
-              <td colspan="7" style="font-weight:bold;border-top:1px solid #000">Subtotal</td>
-              <td style="font-weight:bold;text-align:right;border-top:1px solid #000">$${c.subtotalProjected.toFixed(2)}</td>
+              <td colspan="7" class="subtotal-label">Clinic Subtotal</td>
+              <td class="r subtotal-val">$${c.subtotalProjected.toFixed(2)}</td>
             </tr></tfoot>
           </table>
         </div>`;
     }).join('');
-    const byCptRows = r.totals.byCpt.map((c) =>
-      `<tr><td>${esc(c.cpt_code)}</td><td style="text-align:center">${c.count}</td><td style="text-align:right">$${c.projected.toFixed(2)}</td></tr>`
-    ).join('');
-    return `<!DOCTYPE html><html><head><meta charset="utf-8">
-    <style>
-      *{box-sizing:border-box}
-      body{font-family:Courier,monospace;font-size:11px;color:#000;margin:0;padding:20px;background:#fff}
-      table{width:100%;border-collapse:collapse;font-size:10px;margin-top:4px}
-      th{border-bottom:2px solid #000;text-align:left;padding:3px 5px;font-weight:bold}
-      td{border-bottom:1px solid #ccc;padding:3px 5px;vertical-align:top}
-      @media print{@page{margin:1cm;size:A4 landscape}body{padding:6px}}
-    </style></head><body>
-    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
-      <div style="font-size:15px;font-weight:bold">RPMCARES — MONTHLY BILLING REPORT</div>
-      <div>Period: ${esc(r.period.label)} &nbsp;|&nbsp; Generated: ${new Date(r.generatedAt).toLocaleString('en-US')}</div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:8px;border:1px solid #000;padding:8px;margin-bottom:12px;text-align:center">
-      <div><b>${r.totals.records}</b><br>Records</div>
-      <div><b>${r.totals.totalReadings}</b><br>Readings</div>
-      <div><b>$${r.totals.totalProjected.toFixed(2)}</b><br>Projected</div>
-      <div><b>$${r.totals.totalActual.toFixed(2)}</b><br>Actual</div>
-    </div>
-    ${byCptRows ? `<b>CPT Summary</b><table style="width:auto;margin-bottom:14px"><thead><tr><th>CPT</th><th>Claims</th><th>Projected</th></tr></thead><tbody>${byCptRows}</tbody></table>` : ''}
-    ${clinicSections}
-    <div style="border-top:2px solid #000;padding-top:8px;font-weight:bold;text-align:right">Grand Total: $${r.totals.totalProjected.toFixed(2)}</div>
-    <div style="margin-top:6px;font-size:10px;text-align:center">For billing review only — not a clinical record.</div>
-    </body></html>`;
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; background: #fff; padding: 28px 32px; }
+  @media print { @page { size: A4 landscape; margin: 1.5cm 1.8cm; } body { padding: 0; } }
+
+  .doc-header { border-top: 3px solid #000; border-bottom: 1px solid #000; padding: 10px 0; margin-bottom: 18px; }
+  .doc-title { font-size: 14pt; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; }
+  .doc-meta { font-size: 8.5pt; margin-top: 3px; color: #444; }
+
+  .summary-box { border: 1px solid #000; padding: 8px 12px; margin-bottom: 18px; }
+  .summary-box table { width: 100%; border-collapse: collapse; }
+  .summary-box td { padding: 3px 8px; font-size: 9.5pt; border-right: 1px solid #bbb; text-align: center; width: 25%; }
+  .summary-box td:last-child { border-right: none; }
+  .summary-box .val { font-size: 13pt; font-weight: bold; display: block; }
+  .summary-box .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; color: #333; }
+
+  .section-title { font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 14px 0 6px; }
+
+  table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  table.data th { background: #000; color: #fff; padding: 4px 6px; text-align: left; font-weight: bold; font-size: 8pt; }
+  table.data th.c, table.data td.c { text-align: center; }
+  table.data th.r, table.data td.r { text-align: right; }
+  table.data td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  table.data tr.alt td { background: #f7f7f7; }
+  table.data tfoot td { border-top: 1px solid #000; border-bottom: none; }
+  .subtotal-label { font-weight: bold; font-size: 8.5pt; }
+  .subtotal-val { font-weight: bold; font-size: 8.5pt; }
+  .sub { font-size: 7.5pt; color: #555; }
+
+  table.cpt { width: auto; min-width: 260px; border-collapse: collapse; font-size: 8.5pt; }
+  table.cpt th { background: #000; color: #fff; padding: 4px 10px; text-align: left; }
+  table.cpt td { padding: 3px 10px; border-bottom: 1px solid #ddd; }
+  table.cpt td.c { text-align: center; }
+  table.cpt td.r { text-align: right; }
+
+  .clinic-block { margin-bottom: 20px; page-break-inside: avoid; }
+  .clinic-heading { font-size: 10.5pt; font-weight: bold; margin-bottom: 4px; border-left: 3px solid #000; padding-left: 7px; }
+  .clinic-meta { font-size: 8pt; font-weight: normal; color: #555; margin-left: 10px; }
+
+  .grand-total { border-top: 2px solid #000; padding-top: 8px; font-size: 11pt; font-weight: bold; text-align: right; margin-top: 12px; }
+  .doc-footer { margin-top: 16px; border-top: 1px solid #000; padding-top: 6px; font-size: 7.5pt; color: #555; text-align: center; }
+</style>
+</head><body>
+
+<div class="doc-header">
+  <div class="doc-title">RPMCares &mdash; Monthly Billing Report</div>
+  <div class="doc-meta">Billing Period: <b>${esc(r.period.label)}</b> &nbsp;&nbsp; Generated: ${generatedStr}</div>
+</div>
+
+<div class="summary-box">
+  <table><tr>
+    <td><span class="val">${r.totals.records}</span><span class="lbl">Total Records</span></td>
+    <td><span class="val">${r.totals.totalReadings}</span><span class="lbl">Total Readings</span></td>
+    <td><span class="val">$${r.totals.totalProjected.toFixed(2)}</span><span class="lbl">Projected Revenue</span></td>
+    <td><span class="val">$${r.totals.totalActual.toFixed(2)}</span><span class="lbl">Actual Collected</span></td>
+  </tr></table>
+</div>
+
+${byCptRows ? `<div class="section-title">CPT Code Summary</div>
+<table class="cpt"><thead><tr><th>CPT Code</th><th class="c">Claims</th><th class="r">Projected</th></tr></thead>
+<tbody>${byCptRows}</tbody></table>` : ''}
+
+<div class="section-title">Billing Detail by Clinic</div>
+${clinicSections}
+
+<div class="grand-total">Grand Total Projected: $${r.totals.totalProjected.toFixed(2)}</div>
+
+<div class="doc-footer">
+  CONFIDENTIAL &mdash; For authorized billing review only. Not a clinical or legal record. &nbsp;|&nbsp; RPMCares &copy; ${new Date().getFullYear()}
+</div>
+
+</body></html>`;
   };
 
   const exportMonthlyPdf = async () => {
     if (!report) return;
     setExporting(true);
     try {
-      const Print   = await import('expo-print');
-      const Sharing = await import('expo-sharing');
-      const { uri } = await Print.printToFileAsync({ html: buildMonthlyHtml(report), base64: false });
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Monthly Billing — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+      const html = buildMonthlyHtml(report);
+      if (Platform.OS === 'web') {
+        openReportForDownload(html);
+      } else {
+        const Print   = await import('expo-print');
+        const Sharing = await import('expo-sharing');
+        const { uri } = await Print.printToFileAsync({ html, base64: false });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `Monthly Billing — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+        }
       }
     } catch (e: any) { console.warn('[billing] monthly PDF failed:', e.message); }
     finally { setExporting(false); }
@@ -1143,7 +1312,7 @@ function MonthlyReportTab({ session, colors, isSuperAdmin }: { session: any; col
                 <View style={{ borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }}>
                   {/* Table header */}
                   <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 6, backgroundColor: colors.background }}>
-                    {['Patient', 'CPT', 'Readings', 'Min', 'Status', 'Amt'].map((h) => (
+                    {['Patient', 'CPT', 'Readings', 'Min', 'Projected'].map((h) => (
                       <Text key={h} style={{ color: colors.textSecondary, fontSize: 10, fontWeight: '700', flex: h === 'Patient' ? 3 : 1 }}>{h}</Text>
                     ))}
                   </View>
@@ -1151,18 +1320,14 @@ function MonthlyReportTab({ session, colors, isSuperAdmin }: { session: any; col
                     <View key={r.id} style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border + '44' }}>
                       <View style={{ flex: 3 }}>
                         <Text style={{ color: colors.text, fontSize: 11, fontWeight: '600' }} numberOfLines={1}>{r.patient_name ?? '—'}</Text>
-                        <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{r.patient_program ?? ''} · {r.insurance_payer ?? '—'}</Text>
+                        <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{r.patient_program ?? ''} · {r.insurance_type ?? r.insurance_payer ?? '—'}</Text>
+                        <Text style={{ color: colors.textSecondary, fontSize: 9 }}>
+                          {r.cycle_start ?? '—'}{r.cycle_end ? ` → ${r.cycle_end}` : ''}
+                        </Text>
                       </View>
                       <Text style={{ color: colors.text, fontWeight: '600', fontSize: 11, flex: 1 }}>{r.cpt_code}</Text>
                       <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{r.reading_count}</Text>
                       <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{r.total_minutes}</Text>
-                      <View style={{ flex: 1 }}>
-                        <View style={{ backgroundColor: (STATUS_COLOR[r.status] ?? colors.textSecondary) + '22', borderRadius: 4, paddingHorizontal: 4, paddingVertical: 1, alignSelf: 'flex-start' }}>
-                          <Text style={{ color: STATUS_COLOR[r.status] ?? colors.textSecondary, fontSize: 9, fontWeight: '700' }}>
-                            {r.status.toUpperCase().slice(0, 4)}
-                          </Text>
-                        </View>
-                      </View>
                       <Text style={{ color: colors.text, fontSize: 11, flex: 1 }}>{fmt$(r.projected_amount)}</Text>
                     </View>
                   ))}
@@ -1226,11 +1391,12 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
 
   const load = useCallback(async () => {
     if (!session) return;
-    const target = isSuperAdmin ? clinicId : undefined;
-    if (isSuperAdmin && !target) return;
+    // super_admin picks from dropdown; clinic_admin uses their own clinic automatically
+    const target = isSuperAdmin ? clinicId : (session.user?.clinicId ?? '');
+    if (!target) return; // super_admin hasn't selected a clinic yet
     setLoading(true); setError('');
     try {
-      const data = await api.getClinicReport(session.token, target ?? '', month);
+      const data = await api.getClinicReport(session.token, target, month);
       setReport(data);
     } catch (e) {
       setError(e instanceof ApiError ? e.message : 'Failed to load clinic summary.');
@@ -1245,61 +1411,116 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
 
   const buildClinicHtml = (r: ClinicReport): string => {
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const patientRows = r.patients.map((p) => `
-      <tr>
-        <td>${esc(p.full_name)}<br><span style="font-size:9px">MRN: ${esc(p.mrn ?? '—')}</span></td>
-        <td>${esc(p.program ?? '—')}</td>
-        <td>${esc(p.insurance_payer ?? '—')}</td>
-        <td>${esc(p.icd10_codes.join(', ') || p.diagnoses.join(', ') || '—')}</td>
-        <td style="text-align:center">${p.totalReadings}</td>
-        <td style="text-align:center">${p.totalMinutes} min</td>
-        <td>${esc(p.cptCodes.join(', ') || '—')}</td>
-        <td style="text-align:right">$${p.totalProjected.toFixed(2)}</td>
-      </tr>`).join('');
-    const byCptRows = Object.entries(r.totals.byCpt).map(([code, v]) =>
-      `<tr><td>${esc(code)}</td><td style="text-align:center">${v.count}</td><td style="text-align:right">$${v.amount.toFixed(2)}</td></tr>`
+    const generatedStr = new Date(r.generatedAt).toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    const cptSummaryRows = Object.entries(r.totals.byCpt).map(([code, v]) =>
+      `<tr><td>${esc(code)}</td><td class="c">${v.count}</td><td class="r">$${v.amount.toFixed(2)}</td></tr>`
     ).join('');
-    return `<!DOCTYPE html><html><head><meta charset="utf-8">
-    <style>
-      *{box-sizing:border-box}
-      body{font-family:Courier,monospace;font-size:11px;color:#000;margin:0;padding:20px;background:#fff}
-      table{width:100%;border-collapse:collapse;font-size:10px;margin-top:8px}
-      th{border-bottom:2px solid #000;text-align:left;padding:4px 6px;font-weight:bold}
-      td{border-bottom:1px solid #ccc;padding:4px 6px;vertical-align:top}
-      @media print{@page{margin:1cm;size:A4 landscape}body{padding:6px}}
-    </style></head><body>
-    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
-      <div style="font-size:15px;font-weight:bold">RPMCARES — CLINIC INSURANCE SUMMARY</div>
-      <div>${esc(r.clinic.name)}${r.clinic.specialty ? ` · ${esc(r.clinic.specialty)}` : ''}${r.clinic.location ? ` · ${esc(r.clinic.location)}` : ''}</div>
-      <div>Period: ${esc(r.period.label)} &nbsp;|&nbsp; Generated: ${new Date(r.generatedAt).toLocaleString('en-US')}</div>
-    </div>
-    <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:8px;border:1px solid #000;padding:8px;margin-bottom:12px;text-align:center">
-      <div><b>${r.totals.patients}</b><br>Patients</div>
-      <div><b>${r.totals.totalReadings}</b><br>Readings</div>
-      <div><b>${r.totals.totalMinutes} min</b><br>Review Time</div>
-      <div><b>${r.totals.thresholdMet}</b><br>Threshold Met</div>
-      <div><b>$${r.totals.totalProjected.toFixed(2)}</b><br>Projected</div>
-    </div>
-    ${byCptRows ? `<b>CPT Summary</b><table style="width:auto;margin-bottom:14px"><thead><tr><th>CPT</th><th>Patients</th><th>Projected</th></tr></thead><tbody>${byCptRows}</tbody></table>` : ''}
-    <b>Patient Details</b>
-    <table><thead><tr>
-      <th>Patient (MRN)</th><th>Program</th><th>Insurance</th><th>ICD-10</th>
-      <th>Readings</th><th>Review</th><th>CPT Codes</th><th>Projected</th>
-    </tr></thead><tbody>${patientRows}</tbody></table>
-    <div style="margin-top:10px;border-top:1px solid #000;padding-top:6px;font-size:10px;text-align:center">
-      For billing review only — not a clinical record.
-    </div></body></html>`;
+    const patientRows = r.patients.map((p, i) => `
+      <tr class="${i % 2 === 1 ? 'alt' : ''}">
+        <td>${esc(p.full_name)}<br><span class="sub">MRN: ${esc(p.mrn ?? '—')} &nbsp; DOB: ${esc(p.dob ?? '—')}</span></td>
+        <td>${esc(p.program ?? '—')}</td>
+        <td>${esc(p.insurance_type ?? p.insurance_payer ?? '—')}</td>
+        <td class="c">${p.totalReadings}</td>
+        <td class="c">${p.totalMinutes}</td>
+        <td>${esc(p.cptCodes.join(', ') || '—')}</td>
+        <td>${esc(p.cycle_start ?? '—')}${p.cycle_end ? `<br><span class="sub">${esc(p.cycle_end)}</span>` : ''}</td>
+        <td class="r">$${p.totalProjected.toFixed(2)}</td>
+      </tr>`).join('');
+    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; background: #fff; padding: 28px 32px; }
+  @media print { @page { size: A4 landscape; margin: 1.5cm 1.8cm; } body { padding: 0; } }
+
+  /* Header */
+  .doc-header { border-top: 3px solid #000; border-bottom: 1px solid #000; padding: 10px 0; margin-bottom: 18px; }
+  .doc-title { font-size: 14pt; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; }
+  .doc-sub { font-size: 9.5pt; margin-top: 3px; }
+  .doc-meta { font-size: 8.5pt; margin-top: 2px; color: #444; }
+
+  /* Summary box */
+  .summary-box { border: 1px solid #000; padding: 8px 12px; margin-bottom: 18px; display: table; width: 100%; }
+  .summary-box table { width: 100%; border-collapse: collapse; }
+  .summary-box td { padding: 3px 8px; font-size: 9.5pt; border-right: 1px solid #bbb; text-align: center; width: 20%; }
+  .summary-box td:last-child { border-right: none; }
+  .summary-box .val { font-size: 13pt; font-weight: bold; display: block; }
+  .summary-box .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; color: #333; }
+
+  /* Section headings */
+  .section-title { font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 14px 0 6px; }
+
+  /* Tables */
+  table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
+  table.data th { background: #000; color: #fff; padding: 4px 6px; text-align: left; font-weight: bold; font-size: 8pt; }
+  table.data th.c, table.data td.c { text-align: center; }
+  table.data th.r, table.data td.r { text-align: right; }
+  table.data td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
+  table.data tr.alt td { background: #f7f7f7; }
+  .sub { font-size: 7.5pt; color: #555; }
+
+  /* CPT summary */
+  table.cpt { width: auto; min-width: 260px; border-collapse: collapse; font-size: 8.5pt; }
+  table.cpt th { background: #000; color: #fff; padding: 4px 10px; text-align: left; }
+  table.cpt td { padding: 3px 10px; border-bottom: 1px solid #ddd; }
+
+  /* Footer */
+  .doc-footer { margin-top: 18px; border-top: 1px solid #000; padding-top: 6px; font-size: 7.5pt; color: #555; text-align: center; }
+</style>
+</head><body>
+
+<div class="doc-header">
+  <div class="doc-title">RPMCares &mdash; Clinic Billing Summary Report</div>
+  <div class="doc-sub">${esc(r.clinic.name)}${r.clinic.specialty ? ` &nbsp;&bull;&nbsp; ${esc(r.clinic.specialty)}` : ''}${r.clinic.location ? ` &nbsp;&bull;&nbsp; ${esc(r.clinic.location)}` : ''}</div>
+  <div class="doc-meta">Billing Period: <b>${esc(r.period.label)}</b> &nbsp;&nbsp; Generated: ${generatedStr}</div>
+</div>
+
+<div class="summary-box">
+  <table><tr>
+    <td><span class="val">${r.totals.patients}</span><span class="lbl">Total Patients</span></td>
+    <td><span class="val">${r.totals.totalReadings}</span><span class="lbl">Total Readings</span></td>
+    <td><span class="val">${r.totals.totalMinutes}</span><span class="lbl">Review Min</span></td>
+    <td><span class="val">${r.totals.thresholdMet}</span><span class="lbl">Threshold Met</span></td>
+    <td><span class="val">$${r.totals.totalProjected.toFixed(2)}</span><span class="lbl">Projected Revenue</span></td>
+  </tr></table>
+</div>
+
+${cptSummaryRows ? `<div class="section-title">CPT Code Summary</div>
+<table class="cpt"><thead><tr><th>CPT Code</th><th class="c">Patients</th><th class="r">Projected Amount</th></tr></thead>
+<tbody>${cptSummaryRows}</tbody></table>` : ''}
+
+<div class="section-title">Patient Billing Detail</div>
+<table class="data"><thead><tr>
+  <th>Patient Name &nbsp; MRN / DOB</th>
+  <th>Program</th>
+  <th>Insurance Type</th>
+  <th class="c">Readings</th>
+  <th class="c">Min</th>
+  <th>CPT Codes</th>
+  <th>Cycle Date</th>
+  <th class="r">Projected</th>
+</tr></thead><tbody>${patientRows}</tbody></table>
+
+<div class="doc-footer">
+  CONFIDENTIAL &mdash; For authorized billing review only. Not a clinical or legal record. &nbsp;|&nbsp; RPMCares &copy; ${new Date().getFullYear()}
+</div>
+
+</body></html>`;
   };
 
   const exportClinicPdf = async () => {
     if (!report) return;
     setExporting(true);
     try {
-      const Print   = await import('expo-print');
-      const Sharing = await import('expo-sharing');
-      const { uri } = await Print.printToFileAsync({ html: buildClinicHtml(report), base64: false });
-      if (await Sharing.isAvailableAsync()) {
-        await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${report.clinic.name} — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+      const html = buildClinicHtml(report);
+      if (Platform.OS === 'web') {
+        openReportForDownload(html);
+      } else {
+        const Print   = await import('expo-print');
+        const Sharing = await import('expo-sharing');
+        const { uri } = await Print.printToFileAsync({ html, base64: false });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${report.clinic.name} — ${report.period.label}`, UTI: 'com.adobe.pdf' });
+        }
       }
     } catch (e: any) { console.warn('[billing] clinic PDF failed:', e.message); }
     finally { setExporting(false); }
@@ -1339,6 +1560,16 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
             </View>
           </ScrollView>
         )}
+
+        {/* Export button at the top */}
+        <Pressable
+          onPress={exportClinicPdf}
+          disabled={exporting || !report}
+          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 40, borderRadius: 999, backgroundColor: colors.primary, opacity: (exporting || !report) ? 0.5 : 1 }}
+        >
+          <FileText size={14} color="#fff" />
+          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{exporting ? 'Generating PDF…' : 'Export Insurance Report PDF'}</Text>
+        </Pressable>
       </Card>
 
       {loading && <View style={{ alignItems: 'center', paddingVertical: 32 }}><ActivityIndicator color={colors.primary} /></View>}
@@ -1410,10 +1641,12 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
                 <View style={{ flexDirection: 'row', paddingHorizontal: 14, paddingVertical: 8 }}>
                   <View style={{ flex: 3 }}>
                     <Text style={{ color: colors.text, fontSize: 11, fontWeight: '700' }} numberOfLines={1}>{p.full_name}</Text>
-                    <Text style={{ color: colors.textSecondary, fontSize: 9 }} numberOfLines={1}>
-                      {p.icd10_codes.join(', ') || p.diagnoses.join(', ') || '—'}
+                    <Text style={{ color: colors.textSecondary, fontSize: 9 }}>
+                      {p.insurance_type ?? p.insurance_payer ?? '—'} · MRN: {p.mrn ?? '—'}
                     </Text>
-                    <Text style={{ color: colors.textSecondary, fontSize: 9 }}>{p.insurance_payer ?? '—'} · MRN: {p.mrn ?? '—'}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 9 }}>
+                      Cycle: {p.cycle_start ?? '—'}{p.cycle_end ? ` → ${p.cycle_end}` : ''}
+                    </Text>
                   </View>
                   <Text style={{ color: colors.textSecondary, fontSize: 11, flex: 1 }}>{p.program ?? '—'}</Text>
                   <Text style={{ color: colors.text, fontSize: 10, flex: 1 }}>{p.cptCodes.join('\n') || '—'}</Text>
@@ -1424,13 +1657,8 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
                 {/* Per-program breakdown */}
                 {p.byProgram.map((b) => (
                   <View key={b.program} style={{ flexDirection: 'row', paddingHorizontal: 24, paddingBottom: 6, gap: 6 }}>
-                    <View style={{ backgroundColor: b.thresholdMet ? colors.success + '22' : colors.warning + '22', borderRadius: 4, paddingHorizontal: 5, paddingVertical: 1 }}>
-                      <Text style={{ color: b.thresholdMet ? colors.success : colors.warning, fontSize: 9, fontWeight: '700' }}>
-                        {b.program} {b.thresholdMet ? '✓' : '✗'}
-                      </Text>
-                    </View>
+                    <Text style={{ color: colors.textSecondary, fontSize: 9, fontWeight: '700' }}>{b.program}</Text>
                     <Text style={{ color: colors.textSecondary, fontSize: 9 }}>{b.minutes} min · {b.readings} rdgs</Text>
-                    {b.billingStatus && <Text style={{ color: colors.textSecondary, fontSize: 9 }}>· {b.billingStatus}</Text>}
                   </View>
                 ))}
               </View>
@@ -1442,15 +1670,6 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
             )}
           </Card>
 
-          {/* Export PDF */}
-          <Pressable
-            onPress={exportClinicPdf}
-            disabled={exporting}
-            style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 44, borderRadius: 999, backgroundColor: colors.primary, opacity: exporting ? 0.6 : 1 }}
-          >
-            <FileText size={15} color="#fff" />
-            <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{exporting ? 'Generating PDF…' : 'Export Insurance Report PDF'}</Text>
-          </Pressable>
         </>
       )}
     </ScrollView>
@@ -1476,6 +1695,11 @@ const styles = StyleSheet.create({
 
   // KPI row
   kpiRow:      { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
+
+  // Month picker
+  monthPickerRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth },
+  monthArrow:     { padding: 6 },
+  monthLabel:     { fontSize: 15, fontWeight: '700' },
 
   // Filters
   filterRow:   { flexDirection: 'row', flexWrap: 'wrap', gap: 10 },
@@ -1527,4 +1751,8 @@ const styles = StyleSheet.create({
   modalTitle:   { fontSize: 15, fontWeight: '700', marginBottom: 12 },
   modalInput:   { borderWidth: 1, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14 },
   modalBtn:     { flex: 1, alignItems: 'center', paddingVertical: 12, borderRadius: 10 },
+
+  // Search bar
+  searchRow:   { flexDirection: 'row', alignItems: 'center', gap: 8, paddingBottom: 10, borderBottomWidth: StyleSheet.hairlineWidth, marginBottom: 10 },
+  searchInput: { flex: 1, fontSize: 14, paddingVertical: 2 },
 });

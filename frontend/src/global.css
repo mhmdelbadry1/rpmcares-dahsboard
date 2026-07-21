@@ -7,3 +7,35 @@
   --font-rounded: 'SF Pro Rounded', 'Hiragino Maru Gothic ProN', Meiryo, 'MS PGothic', sans-serif;
   --font-serif: Georgia, 'Times New Roman', serif;
 }
+
+@media print {
+  /* Hide entire app shell — nav bar, tab bar, sidebar, header */
+  [data-testid="sidebar"],
+  [aria-label="navigation"],
+  [role="tablist"],
+  header,
+  nav {
+    display: none !important;
+  }
+
+  /* Force white background and black text everywhere */
+  * {
+    background: #fff !important;
+    color: #000 !important;
+    box-shadow: none !important;
+    border-color: #ccc !important;
+  }
+
+  body {
+    font-family: Arial, Helvetica, sans-serif !important;
+    font-size: 10pt !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Remove browser-added URL/date headers from print */
+  @page {
+    size: A4 portrait;
+    margin: 1.5cm 2cm;
+  }
+}

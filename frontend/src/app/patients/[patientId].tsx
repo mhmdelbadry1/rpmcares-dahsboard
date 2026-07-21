@@ -1,7 +1,7 @@
 import { Stack, useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import {
   Activity, AlertTriangle, Bell, Calendar, CheckCircle2, ChevronLeft, ChevronRight,
-  ClipboardList, Copy, FileText, HeartPulse, Link2, Link2Off, MessageSquare, Phone, Play,
+  ClipboardList, Copy, Download, FileText, HeartPulse, Link2, Link2Off, MessageSquare, Phone, Play,
   Plus, RefreshCw, Sparkles, Square, Thermometer, Timer, TrendingDown, TrendingUp,
   UserPlus, Weight, X, Zap,
   type LucideIcon,
@@ -20,8 +20,9 @@ import {
   type AlertEvent, type AlertStatus, type DetectedImei, type Member, type PatientDevice,
   type Patient, type PatientReading, type ReviewTimeEntry,
   type ReadingType, type SmartMeterDetail, type SmartMeterAddress,
-  type PatientReport, type CarePlan, type BillingCycleReport,
+  type PatientReport, type CarePlan, type BillingCycleReport, type ExportedBillingReport,
 } from '@/lib/api';
+import { openReportForDownload } from '@/lib/pdf-utils';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -105,7 +106,7 @@ const READING_COLORS: Record<ReadingType, string> = {
   unknown:        '#6B7280',
 };
 
-const TABS = ['Info', 'Readings', 'Alerts', 'Devices', 'Notes', 'Review Time', 'Report'] as const;
+const TABS = ['Info', 'Readings', 'Alerts', 'Devices', 'Notes', 'Review Time', 'Report', 'Exported Billing'] as const;
 type Tab = typeof TABS[number];
 
 // ── Sub-components ─────────────────────────────────────────────────────────
@@ -1341,6 +1342,201 @@ function nextMonth(m: string): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
 }
 
+// ── Exported Billing Tab ───────────────────────────────────────────────────
+
+function ExportedBillingTab({ patient, token, colors }: { patient: Patient; token: string; colors: any }) {
+  const [reports, setReports]     = useState<ExportedBillingReport[]>([]);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState<string | null>(null);
+  const [exporting, setExporting] = useState<string | null>(null); // cycle_start being exported
+
+  const load = useCallback(async () => {
+    setLoading(true); setError(null);
+    try {
+      const data = await api.getExportedBillingReports(token, patient.id);
+      setReports(data.reports);
+    } catch (e: any) {
+      setError(e.message ?? 'Failed to load exported reports');
+    } finally { setLoading(false); }
+  }, [token, patient.id]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const buildBillingHtml = (r: PatientReport, cycleStart: string, cycleEnd: string): string => {
+    const p = r.patient;
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const billingRows = r.billingRecords.map((rec) =>
+      `<tr style="background:${r.billingRecords.indexOf(rec) % 2 === 0 ? '#fff' : '#f9f9f9'}">
+        <td style="padding:5px 8px;border-bottom:1px solid #ddd">${esc(rec.cpt_code)}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid #ddd">${esc(rec.program ?? '—')}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid #ddd">${esc(rec.dos ?? '—')}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid #ddd;text-align:right">${rec.units ?? 1}</td>
+        <td style="padding:5px 8px;border-bottom:1px solid #ddd;text-align:right">${rec.projected_amount != null ? `$${Number(rec.projected_amount).toFixed(2)}` : '—'}</td>
+      </tr>`
+    ).join('');
+
+    const totalProjected = r.billingRecords.reduce((s, rec) => s + (Number(rec.projected_amount) || 0), 0);
+    const cats = r.categories;
+    const totalMinutes = cats.reduce((s, c) => s + c.totalMinutes, 0);
+    const totalReadings = cats.reduce((s, c) => Math.max(s, c.readingCount), 0);
+    const cptList = [...new Set(r.billingRecords.map((rec) => rec.cpt_code))].join(', ');
+
+    return `<!DOCTYPE html><html><head><meta charset="utf-8">
+    <style>
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#000;background:#fff;padding:20px}
+      h1{font-size:16px;font-weight:700;margin-bottom:2px}
+      .subtitle{font-size:10px;color:#555;margin-bottom:14px}
+      .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:4px 20px;margin-bottom:14px;font-size:11px}
+      .meta-label{color:#555}
+      .meta-value{font-weight:600}
+      .summary-box{display:flex;gap:16px;border:1px solid #000;padding:10px;margin-bottom:14px}
+      .sum-item{flex:1;text-align:center}
+      .sum-val{font-size:15px;font-weight:800}
+      .sum-lbl{font-size:9px;color:#555;margin-top:2px}
+      table{width:100%;border-collapse:collapse;font-size:11px}
+      thead th{background:#000;color:#fff;padding:6px 8px;text-align:left;font-size:11px}
+      thead th:last-child,thead th:nth-child(4){text-align:right}
+      .footer{border-top:1px solid #000;padding-top:8px;font-size:9px;text-align:center;color:#555;margin-top:16px}
+      @media print{body{padding:8px}@page{size:A4 portrait;margin:1.2cm}}
+    </style></head><body>
+    <div style="border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:12px">
+      <h1>RPMCARES — PATIENT BILLING EXPORT</h1>
+      <div class="subtitle">Cycle Report · Auto-generated at cycle end · For billing review only</div>
+    </div>
+    <div class="meta-grid">
+      <div><span class="meta-label">Patient: </span><span class="meta-value">${esc(p.full_name)}</span></div>
+      <div><span class="meta-label">MRN: </span><span class="meta-value">${esc(p.mrn ?? '—')}</span></div>
+      <div><span class="meta-label">DOB: </span><span class="meta-value">${esc(p.dob ?? '—')}</span></div>
+      <div><span class="meta-label">Program: </span><span class="meta-value">${esc(p.program ?? '—')}</span></div>
+      <div><span class="meta-label">Insurance: </span><span class="meta-value">${esc(p.insurance_payer ?? '—')}</span></div>
+      <div><span class="meta-label">Clinic: </span><span class="meta-value">${esc(r.clinic.name ?? '—')}</span></div>
+      <div><span class="meta-label">Billing Cycle: </span><span class="meta-value">${esc(cycleStart)} → ${esc(cycleEnd)}</span></div>
+      <div><span class="meta-label">Generated: </span><span class="meta-value">${new Date().toLocaleString('en-US')}</span></div>
+    </div>
+    <div class="summary-box">
+      <div class="sum-item"><div class="sum-val">${totalMinutes}</div><div class="sum-lbl">TOTAL MIN</div></div>
+      <div class="sum-item"><div class="sum-val">${totalReadings}</div><div class="sum-lbl">READINGS</div></div>
+      <div class="sum-item"><div class="sum-val">${r.billingRecords.length}</div><div class="sum-lbl">CPT CODES</div></div>
+      <div class="sum-item"><div class="sum-val">$${totalProjected.toFixed(2)}</div><div class="sum-lbl">PROJECTED</div></div>
+    </div>
+    ${r.billingRecords.length > 0 ? `
+    <table>
+      <thead><tr>
+        <th>CPT Code</th><th>Program</th><th>DOS</th><th style="text-align:right">Units</th><th style="text-align:right">Projected</th>
+      </tr></thead>
+      <tbody>${billingRows}</tbody>
+      <tfoot><tr>
+        <td colspan="4" style="padding:6px 8px;font-weight:700;border-top:2px solid #000">Total Projected</td>
+        <td style="padding:6px 8px;font-weight:700;border-top:2px solid #000;text-align:right">$${totalProjected.toFixed(2)}</td>
+      </tr></tfoot>
+    </table>` : '<p style="color:#555;font-style:italic;font-size:11px">No billing records for this cycle.</p>'}
+    <div class="footer">CONFIDENTIAL — For internal billing review only. Not a clinical record.</div>
+    </body></html>`;
+  };
+
+  const generatePdf = async (rep: ExportedBillingReport) => {
+    setExporting(rep.cycle_start);
+    try {
+      const data = await api.getPatientReportByCycle(token, patient.id, rep.cycle_start);
+      const html = buildBillingHtml(data, rep.cycle_start, rep.cycle_end);
+      if (typeof window !== 'undefined') {
+        openReportForDownload(html);
+      } else {
+        const Print = await import('expo-print');
+        const Sharing = await import('expo-sharing');
+        const { uri } = await Print.printToFileAsync({ html, base64: false });
+        if (await Sharing.isAvailableAsync()) {
+          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${patient.full_name} Billing ${rep.cycle_start}`, UTI: 'com.adobe.pdf' });
+        }
+      }
+    } catch (e: any) {
+      console.warn('[exported-billing] PDF failed:', e.message);
+    } finally { setExporting(null); }
+  };
+
+  if (loading) {
+    return (
+      <View style={{ alignItems: 'center', paddingVertical: 40 }}>
+        <ActivityIndicator color={colors.primary} />
+        <Text style={{ color: colors.textSecondary, marginTop: 8, fontSize: 13 }}>Loading exported reports…</Text>
+      </View>
+    );
+  }
+
+  if (error) {
+    return (
+      <Card style={{ gap: 8, alignItems: 'center', paddingVertical: 24 }}>
+        <Text style={{ color: colors.critical, fontSize: 13 }}>{error}</Text>
+        <Pressable onPress={load} style={{ paddingHorizontal: 16, paddingVertical: 8, backgroundColor: colors.primary, borderRadius: 8 }}>
+          <Text style={{ color: '#fff', fontSize: 13, fontWeight: '700' }}>Retry</Text>
+        </Pressable>
+      </Card>
+    );
+  }
+
+  return (
+    <View style={{ gap: 12 }}>
+      <Card style={{ gap: 6 }}>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ color: colors.text, fontWeight: '800', fontSize: 15 }}>Exported Billing Reports</Text>
+          <Pressable onPress={load} style={{ padding: 6 }}>
+            <RefreshCw size={14} color={colors.primary} />
+          </Pressable>
+        </View>
+        <Text style={{ color: colors.textSecondary, fontSize: 12 }}>
+          One report is auto-generated for each completed billing cycle. Tap a row to regenerate the PDF.
+        </Text>
+      </Card>
+
+      {reports.length === 0 ? (
+        <Card style={{ alignItems: 'center', paddingVertical: 32 }}>
+          <FileText size={32} color={colors.textSecondary} strokeWidth={1.25} />
+          <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 10, textAlign: 'center' }}>
+            No exported billing reports yet.{'\n'}Reports are created automatically when a billing cycle ends.
+          </Text>
+        </Card>
+      ) : (
+        reports.map((rep) => {
+          const isExporting = exporting === rep.cycle_start;
+          return (
+            <Card key={rep.id} style={{ gap: 8 }}>
+              <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+                <View style={{ gap: 2 }}>
+                  <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>
+                    Cycle {rep.cycle_start} → {rep.cycle_end}
+                  </Text>
+                  <Text style={{ color: colors.textSecondary, fontSize: 11 }}>
+                    Exported {fmtDateTime(rep.generated_at)}
+                  </Text>
+                </View>
+                <Pressable
+                  onPress={() => generatePdf(rep)}
+                  disabled={isExporting}
+                  style={{
+                    flexDirection: 'row', alignItems: 'center', gap: 5,
+                    backgroundColor: colors.surface, borderColor: colors.primary, borderWidth: 1,
+                    borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6,
+                    opacity: isExporting ? 0.5 : 1,
+                  }}
+                >
+                  <Download size={12} color={colors.primary} />
+                  <Text style={{ color: colors.primary, fontSize: 12, fontWeight: '700' }}>
+                    {isExporting ? 'Generating…' : 'PDF'}
+                  </Text>
+                </Pressable>
+              </View>
+            </Card>
+          );
+        })
+      )}
+    </View>
+  );
+}
+
+// ── Report Tab ─────────────────────────────────────────────────────────────
+
 function ReportTab({ patient, token, colors }: { patient: Patient; token: string; colors: any }) {
   const [month, setMonth]             = useState(currentMonth());
   const [report, setReport]           = useState<PatientReport | null>(null);
@@ -1392,114 +1588,145 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
     } finally { setSavingPlan(false); }
   };
 
-  // ── HTML builder (plain black & white for PDF) ────────────────────────────
+  // ── HTML builder — formal B&W, only programs with activity ──────────────
   const buildHtml = (r: PatientReport): string => {
     const p   = r.patient;
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const noteText = (raw: any): string =>
       typeof raw === 'string' ? raw : (raw as any)?.text ?? JSON.stringify(raw ?? '');
 
-    const catRows = r.categories.map((cat) => {
+    // Only include programs that have at least some time, readings, notes, or billing records
+    const activeCats = r.categories.filter(
+      (cat) => cat.totalMinutes > 0 || cat.readingCount > 0 || cat.notesCount > 0 || cat.billingRecords.length > 0,
+    );
+
+    const catRows = activeCats.map((cat, idx) => {
       const notesHtml = cat.notes.length === 0
-        ? '<p style="color:#555;font-style:italic;margin:4px 0 0">(no documentation in this category)</p>'
+        ? '<tr><td colspan="4" style="padding:8px;color:#555;font-style:italic;font-size:11px">(no documentation this period)</td></tr>'
         : cat.notes.map((n) => {
             const txt = noteText(n.content);
-            return `<div style="border-left:2px solid #000;padding-left:10px;margin-top:8px">
-              <div style="font-size:11px">[${esc(n.dos ?? '—')}]  ${esc(n.status.toUpperCase())}  —  ${esc(n.author_name ?? 'Unknown')}</div>
-              <div style="font-size:11px">CPT: ${esc(n.cpt_codes.join(', '))}</div>
-              <div style="font-size:12px;margin-top:3px;white-space:pre-wrap">${esc(txt.slice(0, 600))}${txt.length > 600 ? '…' : ''}</div>
-            </div>`;
+            return `<tr style="background:${cat.notes.indexOf(n) % 2 === 0 ? '#fff' : '#f9f9f9'}">
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px;white-space:nowrap">${esc(n.dos ?? '—')}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px">${esc(n.status.toUpperCase())}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px">${esc(n.author_name ?? '—')}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;font-size:11px;white-space:pre-wrap">${esc(txt.slice(0, 400))}${txt.length > 400 ? '…' : ''}</td>
+            </tr>`;
           }).join('');
-      const billingHtml = cat.billingRecords.length > 0
-        ? `<div style="margin-top:6px;border-top:1px solid #aaa;padding-top:6px">
-            ${cat.billingRecords.map((rec) =>
-              `<div style="display:flex;gap:24px;font-size:11px">
-                <span><b>${esc(rec.cpt_code)}</b></span>
-                <span>${esc(rec.status)}</span>
-                <span>${rec.projected_amount != null ? `$${Number(rec.projected_amount).toFixed(2)}` : '—'}</span>
-              </div>`).join('')}</div>` : '';
 
-      return `<div style="border:1px solid #000;padding:12px;margin-bottom:10px;break-inside:avoid">
-        <div style="display:flex;justify-content:space-between;align-items:baseline;margin-bottom:6px">
-          <b style="font-size:13px">${esc(cat.label)}</b>
-          <span style="font-size:11px;font-weight:bold">${cat.thresholdMet ? `[MET ✓  ≥${cat.thresholdMinutes} min]` : `[NOT MET  ≥${cat.thresholdMinutes} min]`}</span>
+      const billingHtml = cat.billingRecords.length > 0
+        ? `<div style="margin-top:10px;padding-top:8px;border-top:1px solid #ccc">
+            <div style="font-size:10px;font-weight:700;color:#555;margin-bottom:4px;letter-spacing:.5px">BILLING RECORDS</div>
+            <table style="width:100%;border-collapse:collapse;font-size:11px">
+              <thead><tr>
+                <th style="text-align:left;background:#000;color:#fff;padding:4px 8px">CPT</th>
+                <th style="text-align:left;background:#000;color:#fff;padding:4px 8px">DOS</th>
+                <th style="text-align:right;background:#000;color:#fff;padding:4px 8px">Units</th>
+                <th style="text-align:right;background:#000;color:#fff;padding:4px 8px">Projected</th>
+              </tr></thead>
+              <tbody>${cat.billingRecords.map((rec, i) =>
+                `<tr style="background:${i % 2 === 0 ? '#fff' : '#f9f9f9'}">
+                  <td style="padding:4px 8px;border-bottom:1px solid #eee;font-weight:700">${esc(rec.cpt_code)}</td>
+                  <td style="padding:4px 8px;border-bottom:1px solid #eee">${esc(rec.dos ?? '—')}</td>
+                  <td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:right">${rec.units ?? 1}</td>
+                  <td style="padding:4px 8px;border-bottom:1px solid #eee;text-align:right">${rec.projected_amount != null ? `$${Number(rec.projected_amount).toFixed(2)}` : '—'}</td>
+                </tr>`).join('')}</tbody>
+            </table>
+          </div>` : '';
+
+      return `<div style="margin-bottom:14px;border:1px solid #000;break-inside:avoid">
+        <div style="background:#000;color:#fff;padding:7px 12px;display:flex;justify-content:space-between;align-items:center">
+          <span style="font-size:12px;font-weight:700">${esc(cat.label)}</span>
+          <span style="font-size:11px;font-weight:700">${cat.thresholdMet ? `MET ✓  ≥${cat.thresholdMinutes} min` : `NOT MET  ≥${cat.thresholdMinutes} min`}</span>
         </div>
-        <div style="font-size:12px;margin-bottom:4px">
-          Total time: ${cat.totalMinutes} min (review ${cat.reviewMinutes} min)
-          &nbsp;&nbsp;|&nbsp;&nbsp;
-          Readings: ${cat.readingCount}
-          &nbsp;&nbsp;|&nbsp;&nbsp;
-          Notes: ${cat.notesCount}
+        <div style="padding:8px 12px;background:#f5f5f5;border-bottom:1px solid #ccc;display:flex;gap:24px;font-size:11px">
+          <span><b>Total time:</b> ${cat.totalMinutes} min</span>
+          <span><b>Review time:</b> ${cat.reviewMinutes} min</span>
+          <span><b>Readings:</b> ${cat.readingCount}</span>
+          <span><b>Notes:</b> ${cat.notesCount}</span>
         </div>
-        <hr style="border:none;border-top:1px solid #ccc;margin:6px 0">
-        ${notesHtml}${billingHtml}
+        ${cat.notes.length > 0 ? `
+        <table style="width:100%;border-collapse:collapse;font-size:11px">
+          <thead><tr>
+            <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">DATE</th>
+            <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">STATUS</th>
+            <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">AUTHOR</th>
+            <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">NOTE</th>
+          </tr></thead>
+          <tbody>${notesHtml}</tbody>
+        </table>` : `<div style="padding:8px 12px"><p style="color:#555;font-style:italic;font-size:11px;margin:0">(no documentation this period)</p></div>`}
+        <div style="padding:0 12px 10px">${billingHtml}</div>
       </div>`;
     }).join('');
 
     const cyclesHtml = r.billingCycles.length > 0
-      ? `<div style="border:1px solid #000;padding:12px;margin-bottom:10px;break-inside:avoid">
-          <b style="font-size:13px">Billing Cycles</b>
-          <table style="width:100%;border-collapse:collapse;margin-top:8px;font-size:11px">
+      ? `<div style="margin-bottom:14px;border:1px solid #000;break-inside:avoid">
+          <div style="background:#000;color:#fff;padding:7px 12px;font-size:12px;font-weight:700">Billing Cycles</div>
+          <table style="width:100%;border-collapse:collapse;font-size:11px">
             <thead><tr>
-              <th style="text-align:left;border-bottom:1px solid #000;padding:3px">Cycle Start</th>
-              <th style="text-align:left;border-bottom:1px solid #000;padding:3px">Status</th>
-              <th style="text-align:left;border-bottom:1px solid #000;padding:3px">CPT Codes</th>
-              <th style="text-align:right;border-bottom:1px solid #000;padding:3px">Projected</th>
-              <th style="text-align:right;border-bottom:1px solid #000;padding:3px">Actual</th>
+              <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">CYCLE START</th>
+              <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">CPT CODES</th>
+              <th style="text-align:right;background:#444;color:#fff;padding:4px 8px;font-size:10px">PROJECTED</th>
+              <th style="text-align:right;background:#444;color:#fff;padding:4px 8px;font-size:10px">ACTUAL</th>
             </tr></thead>
-            <tbody>
-              ${r.billingCycles.map((cy) => `<tr>
-                <td style="padding:3px;border-bottom:1px solid #ddd">${esc(cy.cycle_start)}</td>
-                <td style="padding:3px;border-bottom:1px solid #ddd">${esc(cy.status)}</td>
-                <td style="padding:3px;border-bottom:1px solid #ddd">${esc(cy.records.map((rec: any) => rec.cpt_code).join(', ') || '—')}</td>
-                <td style="text-align:right;padding:3px;border-bottom:1px solid #ddd">$${cy.totalProjected.toFixed(2)}</td>
-                <td style="text-align:right;padding:3px;border-bottom:1px solid #ddd">$${cy.totalActual.toFixed(2)}</td>
-              </tr>`).join('')}
-            </tbody>
+            <tbody>${r.billingCycles.map((cy, i) => `<tr style="background:${i % 2 === 0 ? '#fff' : '#f9f9f9'}">
+              <td style="padding:5px 8px;border-bottom:1px solid #eee">${esc(cy.cycle_start)}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee">${esc(cy.records.map((rec: any) => rec.cpt_code).join(', ') || '—')}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">$${cy.totalProjected.toFixed(2)}</td>
+              <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">$${cy.totalActual.toFixed(2)}</td>
+            </tr>`).join('')}</tbody>
           </table>
         </div>` : '';
 
     const carePlanHtml = r.carePlan
-      ? `<div style="border:1px solid #000;padding:12px;margin-bottom:10px;break-inside:avoid">
-          <b style="font-size:13px">Patient Care Plan</b>
-          <p style="font-size:12px;line-height:1.6;white-space:pre-wrap;margin-top:6px">${esc(planText(r.carePlan.content))}</p>
-          ${r.carePlan.signed_at ? `<p style="font-size:10px;margin-top:6px">Signed ${new Date(r.carePlan.signed_at).toLocaleDateString('en-US')}${r.carePlan.author_name ? ` — ${esc(r.carePlan.author_name)}` : ''}</p>` : ''}
+      ? `<div style="margin-bottom:14px;border:1px solid #000;break-inside:avoid">
+          <div style="background:#000;color:#fff;padding:7px 12px;font-size:12px;font-weight:700">Patient Care Plan</div>
+          <div style="padding:10px 12px">
+            <p style="font-size:12px;line-height:1.7;white-space:pre-wrap;margin:0">${esc(planText(r.carePlan.content))}</p>
+            ${r.carePlan.signed_at ? `<p style="font-size:10px;color:#555;margin:6px 0 0">Signed ${new Date(r.carePlan.signed_at).toLocaleDateString('en-US')}${r.carePlan.author_name ? ` — ${esc(r.carePlan.author_name)}` : ''}</p>` : ''}
+          </div>
         </div>` : '';
 
-    const meta = [
-      ['Patient',   `${p.full_name}  (${p.mrn ?? patient.id})`],
-      ['DOB',       p.dob ?? '—'],
-      ['Program',   p.program ?? '—'],
-      ['Diagnoses', p.diagnoses.join(', ') || '—'],
-      ['ICD-10',    p.icd10_codes.join(', ') || '—'],
-      ['Insurance', p.insurance_payer ?? '—'],
-      ['Provider',  r.provider ?? '—'],
-      ['Clinic',    r.clinic.name ?? '—'],
-      ['Period',    r.period.label],
-      ['Generated', new Date(r.generatedAt).toLocaleString('en-US')],
+    const metaRows = [
+      ['Patient',        `${p.full_name}  (${p.mrn ?? patient.id})`],
+      ['DOB',            p.dob ?? '—'],
+      ['Program',        p.program ?? '—'],
+      ['Diagnoses',      p.diagnoses.join(', ') || '—'],
+      ['ICD-10',         p.icd10_codes.join(', ') || '—'],
+      ['Insurance Type', p.insurance_type ?? '—'],
+      ['Insurance',      p.insurance_payer ?? '—'],
+      ['Provider',       r.provider ?? '—'],
+      ['Clinic',         r.clinic.name ?? '—'],
+      ['Period',         r.period.label],
+      ['Generated',      new Date(r.generatedAt).toLocaleString('en-US')],
       ...(r.readingCount != null
         ? [['Total Readings', `${r.readingCount}${r.monitoringDays != null ? `  (${r.monitoringDays} monitoring days)` : ''}`]]
         : []),
-    ].map(([l, v]) =>
-      `<tr><td style="padding:2px 12px 2px 0;color:#555;white-space:nowrap">${esc(String(l))}</td><td style="padding:2px 0">${esc(String(v))}</td></tr>`
+    ].map(([l, v], i) =>
+      `<tr style="background:${i % 2 === 0 ? '#fff' : '#f5f5f5'}">
+        <td style="padding:4px 12px 4px 8px;font-size:11px;color:#555;font-weight:700;white-space:nowrap;border-bottom:1px solid #eee">${esc(String(l))}</td>
+        <td style="padding:4px 8px;font-size:11px;border-bottom:1px solid #eee">${esc(String(v))}</td>
+      </tr>`
     ).join('');
 
     return `<!DOCTYPE html><html><head><meta charset="utf-8">
     <style>
-      *{box-sizing:border-box}
-      body{font-family:Courier,monospace;font-size:12px;color:#000;margin:0;padding:24px;background:#fff}
-      @media print{body{padding:8px}@page{margin:1cm}}
+      *{box-sizing:border-box;margin:0;padding:0}
+      body{font-family:Arial,Helvetica,sans-serif;font-size:12px;color:#000;background:#fff;padding:20px}
+      @media print{body{padding:8px}@page{size:A4 portrait;margin:1.2cm}}
     </style></head><body>
-    <div style="text-align:center;border-bottom:2px solid #000;padding-bottom:8px;margin-bottom:16px">
-      <div style="font-size:15px;font-weight:bold">RPMCARES — CARE MANAGEMENT NOTES EXPORT</div>
-      <div style="font-size:10px;margin-top:2px">For billing review only — not a clinical record</div>
+    <div style="border-bottom:3px solid #000;padding-bottom:10px;margin-bottom:14px">
+      <div style="font-size:17px;font-weight:800;letter-spacing:-.3px">RPMCARES — CARE MANAGEMENT NOTES EXPORT</div>
+      <div style="font-size:10px;color:#555;margin-top:3px">For billing review only — not a clinical record</div>
     </div>
-    <table style="margin-bottom:16px;font-size:12px"><tbody>${meta}</tbody></table>
-    ${catRows}
+    <div style="margin-bottom:14px;border:1px solid #000">
+      <div style="background:#000;color:#fff;padding:6px 12px;font-size:11px;font-weight:700;letter-spacing:.5px">PATIENT INFORMATION</div>
+      <table style="width:100%;border-collapse:collapse"><tbody>${metaRows}</tbody></table>
+    </div>
+    ${activeCats.length === 0 ? '<p style="color:#555;font-style:italic;font-size:12px">No program activity recorded for this period.</p>' : catRows}
     ${cyclesHtml}
     ${carePlanHtml}
-    <div style="border-top:1px solid #000;padding-top:8px;font-size:10px;text-align:center;margin-top:8px">
-      Signed electronically by care team. For billing review only — not a clinical record.
+    <div style="border-top:1px solid #000;padding-top:8px;font-size:9px;text-align:center;color:#555;margin-top:8px">
+      CONFIDENTIAL — For internal billing review only. Not a clinical record.
     </div>
     </body></html>`;
   };
@@ -1508,9 +1735,13 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
     if (!report) return;
     setExporting(true);
     try {
+      const html = buildHtml(report);
+      if (typeof window !== 'undefined') {
+        openReportForDownload(html);
+        return;
+      }
       const Print = await import('expo-print');
       const Sharing = await import('expo-sharing');
-      const html = buildHtml(report);
       const { uri } = await Print.printToFileAsync({ html, base64: false });
       const canShare = await Sharing.isAvailableAsync();
       if (canShare) {
@@ -1587,7 +1818,7 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
                 ['Program',   report.patient.program ?? '—'],
                 ['Diagnoses', report.patient.diagnoses.join(', ') || '—'],
                 ['ICD-10',    report.patient.icd10_codes.join(', ') || '—'],
-                ['Insurance', report.patient.insurance_payer ?? '—'],
+                ['Insurance', report.patient.insurance_type ?? report.patient.insurance_payer ?? '—'],
                 ['Provider',  report.provider ?? '—'],
                 ['Clinic',    report.clinic.name ?? '—'],
                 ['Period',    report.period.label],
@@ -1711,6 +1942,40 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
               })}
             </Card>
           )}
+
+          {/* Billing Pricing Summary */}
+          {report.billingRecords.length > 0 && (() => {
+            const totalProjected = report.billingRecords.reduce((s, r) => s + (Number(r.projected_amount) || 0), 0);
+            return (
+              <Card style={{ gap: 8 }}>
+                <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>Billing Pricing</Text>
+                <View style={{ flexDirection: 'row', gap: 8 }}>
+                  <View style={{ flex: 1, backgroundColor: colors.background, borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                    <Text style={{ color: colors.primary, fontWeight: '800', fontSize: 16 }}>${totalProjected.toFixed(2)}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 10, marginTop: 2 }}>Total Projected</Text>
+                  </View>
+                  <View style={{ flex: 1, backgroundColor: colors.background, borderRadius: 8, padding: 10, alignItems: 'center' }}>
+                    <Text style={{ color: colors.text, fontWeight: '800', fontSize: 16 }}>{report.billingRecords.length}</Text>
+                    <Text style={{ color: colors.textSecondary, fontSize: 10, marginTop: 2 }}>CPT Codes</Text>
+                  </View>
+                </View>
+                {report.billingRecords.map((rec) => (
+                  <View key={rec.id} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: colors.border }}>
+                    <View style={{ gap: 1 }}>
+                      <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>{rec.cpt_code}</Text>
+                      <Text style={{ color: colors.textSecondary, fontSize: 11 }}>{rec.program} · DOS {rec.dos ?? '—'}</Text>
+                    </View>
+                    <View style={{ alignItems: 'flex-end', gap: 1 }}>
+                      <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 14 }}>
+                        {rec.projected_amount != null ? `$${Number(rec.projected_amount).toFixed(2)}` : '—'}
+                      </Text>
+                      <Text style={{ color: colors.textSecondary, fontSize: 10 }}>{rec.insurance_type ?? '—'}</Text>
+                    </View>
+                  </View>
+                ))}
+              </Card>
+            );
+          })()}
 
           {/* Care Plan */}
           <Card style={{ gap: 8 }}>
@@ -2423,8 +2688,8 @@ export default function PatientDetail() {
               </StatusPill>
               <StatusPill tone="muted">{patient.program}</StatusPill>
               <StatusPill tone={riskTone(patient.risk)}>{patient.risk} risk</StatusPill>
-              <StatusPill tone={patient.source === 'tenovi' ? 'info' : 'muted'}>
-                {patient.source === 'tenovi' ? 'Tenovi' : 'SmartMeter'}
+              <StatusPill tone={patient.source === 'tenovi' ? 'info' : patient.source === 'local' ? 'success' : 'muted'}>
+                {patient.source === 'tenovi' ? 'Tenovi' : patient.source === 'local' ? 'Local' : 'SmartMeter'}
               </StatusPill>
             </View>
           </View>
@@ -2437,6 +2702,9 @@ export default function PatientDetail() {
             { label: 'MRN',      value: patient.mrn ?? '—' },
             { label: 'Language', value: patient.language },
             { label: 'Enrolled', value: fmtDate(patient.enrolled_at) },
+            ...(patient.current_cycle
+              ? [{ label: 'Cycle', value: `${patient.current_cycle.cycle_start} → ${patient.current_cycle.cycle_end}` }]
+              : []),
           ].map(({ label, value }) => (
             <View key={label} style={s.metricItem}>
               <Text style={[s.metricLabel, { color: colors.textSecondary }]}>{label}</Text>
@@ -2522,7 +2790,8 @@ export default function PatientDetail() {
             {t === 'Alerts'     && <Bell size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
             {t === 'Devices'    && <Activity size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
             {t === 'Notes'      && <FileText size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
-            {t === 'Review Time' && <Timer size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
+            {t === 'Review Time'      && <Timer size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
+            {t === 'Exported Billing' && <Download size={12} color={tab === t ? '#052B00' : colors.textSecondary} />}
             <Text style={[s.tabText, { color: tab === t ? '#052B00' : colors.textSecondary }]}>{t}</Text>
           </Pressable>
         ))}
@@ -2710,6 +2979,10 @@ export default function PatientDetail() {
 
       {tab === 'Report' && (
         <ReportTab patient={patient} token={session?.token ?? ''} colors={colors} />
+      )}
+
+      {tab === 'Exported Billing' && (
+        <ExportedBillingTab patient={patient} token={session?.token ?? ''} colors={colors} />
       )}
     </ScrollView>
   );

@@ -23,8 +23,8 @@ export async function getQueue(req: Request, res: Response): Promise<void> {
     status:        req.query.status        as string | undefined,
     month:         req.query.month         as string | undefined,
   };
-  const records = await listBillingQueue(profile.role, profile.clinic_id, filters);
-  res.json({ records, count: records.length });
+  const { records, totalCount } = await listBillingQueue(profile.role, profile.clinic_id, filters);
+  res.json({ records, count: records.length, totalCount });
 }
 
 export async function patchRecord(req: Request, res: Response): Promise<void> {
