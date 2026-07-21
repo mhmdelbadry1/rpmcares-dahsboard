@@ -379,7 +379,7 @@ export default function CommunicationsScreen() {
             const rest    = prev.filter(l => !(l as RichLog)._optimistic && !(l as RichLog)._failed);
             return [...pending, incoming, ...rest];
           });
-          markRead(selected.id);
+          markRead(selected.id).catch(() => {});
         },
       )
       .subscribe();
@@ -393,8 +393,8 @@ export default function CommunicationsScreen() {
     setSelected(patient);
     setLogs([]);
     loadLogs(patient.id, true);
-    markRead(patient.id);
-  }, [selected, loadLogs, markRead]);
+    markRead(patient.id).catch((err: any) => showError(err?.message ?? 'Could not mark as read.'));
+  }, [selected, loadLogs, markRead, showError]);
 
   // ── Route param auto-select ───────────────────────────────────────────────
   useEffect(() => {
@@ -711,13 +711,25 @@ export default function CommunicationsScreen() {
   }, []);
 
   // ── Mark all as read ──────────────────────────────────────────────────────
+  const [markingAllRead, setMarkingAllRead] = useState(false);
   const markAllReadFn = useCallback(async () => {
-    if (!token) return;
+    if (!token || markingAllRead) return;
     const source = allLoaded ? allPatients : patients;
     const unread = source.filter(p => (unreadCounts[p.id]?.unread ?? 0) > 0);
-    await Promise.all(unread.map(p => api.markCommRead(token, p.id).catch(() => {})));
-    refreshUnread();
-  }, [allPatients, allLoaded, patients, unreadCounts, token, refreshUnread]);
+    if (!unread.length) return;
+    setMarkingAllRead(true);
+    const results = await Promise.allSettled(unread.map(p => api.markCommRead(token, p.id)));
+    await refreshUnread();
+    setMarkingAllRead(false);
+    const failed = results.filter(r => r.status === 'rejected').length;
+    if (failed > 0) {
+      showError(
+        failed === unread.length
+          ? 'Could not mark messages as read. Check your connection and try again.'
+          : `${failed} of ${unread.length} conversations could not be marked as read.`
+      );
+    }
+  }, [allPatients, allLoaded, patients, unreadCounts, token, markingAllRead, refreshUnread, showError]);
 
   // ── Filtered + sorted patient list ────────────────────────────────────────
   const displayedPatients = useMemo(() => {
@@ -882,9 +894,15 @@ export default function CommunicationsScreen() {
             </Pressable>
           ))}
           {Object.values(unreadCounts).some(c => (c.unread ?? 0) > 0) && (
-            <Pressable style={s.markAllBtn} onPress={markAllReadFn}>
-              <CheckCheck size={11} color="#3b82f6" />
-              <Text style={s.markAllBtnText}>All read</Text>
+            <Pressable
+              style={[s.markAllBtn, markingAllRead && s.markAllBtnDisabled]}
+              onPress={markAllReadFn}
+              disabled={markingAllRead}
+            >
+              {markingAllRead
+                ? <ActivityIndicator size="small" color="#3b82f6" />
+                : <CheckCheck size={11} color="#3b82f6" />}
+              <Text style={s.markAllBtnText}>{markingAllRead ? 'Marking read…' : 'All read'}</Text>
             </Pressable>
           )}
         </View>
@@ -1217,6 +1235,7 @@ const s = StyleSheet.create({
   sortBtnTextActive: { color: '#2563eb' },
   markAllBtn:        { flexDirection: 'row', alignItems: 'center', gap: 3, marginLeft: 'auto', paddingHorizontal: 6, paddingVertical: 3, borderRadius: 8, backgroundColor: '#eff6ff' },
   markAllBtnText:    { fontSize: 11, color: '#3b82f6', fontWeight: '600' },
+  markAllBtnDisabled: { opacity: 0.6 },
 
   // Header call button variants
   callBtnRinging:    { backgroundColor: '#d97706' },

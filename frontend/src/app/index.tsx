@@ -228,7 +228,7 @@ function buildSnapshotHtml(opts: {
     <div class="kpi">
       <div class="kpi-label">Active Alerts</div>
       <div class="kpi-value">${(sm?.unreadAlerts??0).toLocaleString()}</div>
-      <div class="kpi-sub">Unread alerts requiring clinical triage</div>
+      <div class="kpi-sub">Alerts requiring clinical triage</div>
     </div>
     <div class="kpi">
       <div class="kpi-label">Compliance Rate</div>
@@ -570,7 +570,7 @@ export default function Dashboard() {
           sub={
             tenoviAlerts > 0
               ? `SmartMeter ${smAlerts.toLocaleString()} · Tenovi ${tenoviAlerts.toLocaleString()}`
-              : 'Unread — requires triage'
+              : 'Requires clinical triage'
           }
         />
         <KpiTile

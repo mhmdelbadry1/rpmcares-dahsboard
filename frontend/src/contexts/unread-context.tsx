@@ -33,6 +33,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
 
   const markRead = useCallback(async (patientId: string) => {
     if (!token) return;
+    const previous = counts[patientId];
     // Optimistically clear unread badge so it doesn't flicker while the API call completes.
     setCounts(prev => {
       if (!prev[patientId]) return prev;
@@ -45,8 +46,13 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
       // Refresh AFTER the server has recorded the view so the next fetch is accurate.
       const { counts: data } = await api.getUnreadCounts(token);
       setCounts(data);
-    } catch { /* silent */ }
-  }, [token]);
+    } catch {
+      // Roll back immediately instead of leaving a stale "read" state that
+      // silently reverts on the next poll with no explanation.
+      if (previous) setCounts(prev => ({ ...prev, [patientId]: previous }));
+      throw new Error('Could not mark as read. Check your connection and try again.');
+    }
+  }, [token, counts]);
 
   // Load on mount and whenever token changes
   useEffect(() => {
