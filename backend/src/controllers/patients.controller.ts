@@ -19,7 +19,7 @@ export function normalizePhone(raw: string | undefined | null): string | undefin
 }
 import { findProfileById } from "../models/profile";
 import { listPatients, findPatientById, createPatient, deletePatient, updatePatientProfileExtras } from "../models/patient";
-import { enrollTenoviPatient, getTenoviFacilities, getRpmToken } from "../services/tenovi";
+import { enrollTenoviPatient, getTenoviFacilities, getRpmToken, postTenoviReviewVoidedEvent } from "../services/tenovi";
 import {
   enrollSmartMeterPatient,
   getSmartMeterPatientDetail,
@@ -642,12 +642,14 @@ export async function deleteReviewTime(req: Request, res: Response) {
 
   const { data: entry } = await supabaseAdmin
     .from("patient_review_times")
-    .select("sm_review_time_id")
+    .select("sm_review_time_id, tenovi_event_id, tenovi_review_log_id, comm_log_id, logged_by")
     .eq("id", entryId)
     .eq("patient_id", id)
     .maybeSingle();
 
   if (!entry) return res.status(404).json({ error: "Review time entry not found." });
+
+  let tenoviVoided = false;
 
   // Best-effort: delete from SmartMeter
   if (entry.sm_review_time_id) {
@@ -659,8 +661,28 @@ export async function deleteReviewTime(req: Request, res: Response) {
     }
   }
 
+  // Tenovi's events log is append-only — there's no delete endpoint, so post
+  // a correction event instead of leaving the original silently unexplained.
+  if ((entry.tenovi_event_id || entry.tenovi_review_log_id) &&
+      patient.source === "tenovi" && (patient.program === "RPM" || patient.program === "RTM")) {
+    await postTenoviReviewVoidedEvent(patient.external_patient_id, patient.program, entry.logged_by ?? "Staff")
+      .catch((e) => console.warn("[review-time] Tenovi void event failed:", e));
+    tenoviVoided = true;
+  }
+
+  // The AI-generated note for this call is only meaningful alongside its
+  // review-time record — remove it too rather than leaving an orphaned note.
+  if (entry.comm_log_id) {
+    await supabaseAdmin.from("care_notes").delete().eq("comm_log_id", entry.comm_log_id);
+  }
+
   await supabaseAdmin.from("patient_review_times").delete().eq("id", entryId);
-  return res.json({ ok: true });
+  return res.json({
+    ok: true,
+    tenoviNote: tenoviVoided
+      ? "Tenovi's event log can't be deleted — a 'Review Time Voided' correction event was posted instead."
+      : null,
+  });
 }
 
 // ── Log manual review time ─────────────────────────────────────────────────

@@ -762,7 +762,7 @@ export const api = {
       `/api/patients/${patientId}/review-time`, { method: 'GET' }, token,
     ),
   deletePatientReviewTime: (token: string, patientId: string, entryId: string) =>
-    request<{ ok: true }>(
+    request<{ ok: true; tenoviNote: string | null }>(
       `/api/patients/${patientId}/review-time/${entryId}`, { method: 'DELETE' }, token,
     ),
 

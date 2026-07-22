@@ -1242,6 +1242,7 @@ function ReviewTimeTab({
   const [notedCommLogIds, setNotedCommLogIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [infoMsg, setInfoMsg] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [showLogModal, setShowLogModal] = useState(false);
 
@@ -1266,8 +1267,12 @@ function ReviewTimeTab({
     if (!session) return;
     setDeletingId(entryId);
     try {
-      await api.deletePatientReviewTime(session.token, patientId, entryId);
+      const result = await api.deletePatientReviewTime(session.token, patientId, entryId);
       setEntries((prev) => prev.filter((e) => e.id !== entryId));
+      if (result.tenoviNote) {
+        setInfoMsg(result.tenoviNote);
+        setTimeout(() => setInfoMsg(null), 6000);
+      }
     } catch (e: any) {
       setError(e?.message ?? 'Failed to delete entry');
     } finally {
@@ -1309,6 +1314,11 @@ function ReviewTimeTab({
 
   return (
     <View style={{ gap: 10 }}>
+      {!!infoMsg && (
+        <View style={[rv.infoBanner, { backgroundColor: colors.primary + '14', borderColor: colors.primary + '33' }]}>
+          <Text style={[rv.infoBannerText, { color: colors.text }]}>{infoMsg}</Text>
+        </View>
+      )}
       {/* Log button */}
       {canLog && (
         <Pressable
@@ -1448,6 +1458,8 @@ const rv = StyleSheet.create({
   sourceBadge:    { borderRadius: 999, paddingHorizontal: 5, paddingVertical: 2, alignSelf: 'flex-start' },
   sourceText:     { fontSize: 9, fontWeight: '700' },
   logBtn:         { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 7, paddingVertical: 11, borderRadius: 12 },
+  infoBanner:     { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, padding: 10 },
+  infoBannerText: { fontSize: 12, lineHeight: 17 },
   // Modal styles
   backdrop:       { flex: 1, backgroundColor: 'rgba(0,0,0,0.4)', justifyContent: 'flex-end' },
   sheet:          { borderTopLeftRadius: 22, borderTopRightRadius: 22, borderWidth: StyleSheet.hairlineWidth, padding: 20, paddingBottom: 36, gap: 14 },

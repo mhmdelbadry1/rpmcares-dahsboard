@@ -205,20 +205,46 @@ export async function postTenoviReviewTime(
 // summary lands (seconds after the review-time push above, once Gemini
 // finishes), this posts it as a distinct supplementary event on the same
 // patient timeline rather than silently leaving the placeholder note.
+async function postTenoviEvent(
+  externalPatientId: string,
+  module: "RPM" | "RTM",
+  title: string,
+  details: string,
+  reviewerName: string,
+): Promise<void> {
+  const eventUrl = module === "RTM" ? "/rtm/patients" : "/patients";
+  try {
+    await rpmPost(`${eventUrl}/${externalPatientId}/events/`, {
+      patient: externalPatientId, created_by: reviewerName, details, title,
+    });
+  } catch (err) {
+    console.warn(`[tenovi] "${title}" event failed for patient ${externalPatientId} (${module}):`, err);
+  }
+}
+
 export async function postTenoviCallSummaryEvent(
   externalPatientId: string,
   module: "RPM" | "RTM",
   summary: string,
   reviewerName: string,
 ): Promise<void> {
-  const eventUrl = module === "RTM" ? "/rtm/patients" : "/patients";
-  try {
-    await rpmPost(`${eventUrl}/${externalPatientId}/events/`, {
-      patient: externalPatientId, created_by: reviewerName, details: summary, title: "AI Call Summary",
-    });
-  } catch (err) {
-    console.warn(`[tenovi] AI call summary event failed for patient ${externalPatientId} (${module}):`, err);
-  }
+  await postTenoviEvent(externalPatientId, module, "AI Call Summary", summary, reviewerName);
+}
+
+// Tenovi's events log is append-only — there's no delete endpoint, so a
+// removed review-time entry can't be un-created on their side. This posts a
+// correction event instead of silently leaving stale data (standard
+// audit-trail practice: annotate, don't erase).
+export async function postTenoviReviewVoidedEvent(
+  externalPatientId: string,
+  module: "RPM" | "RTM",
+  reviewerName: string,
+): Promise<void> {
+  await postTenoviEvent(
+    externalPatientId, module, "Review Time Voided",
+    "This review-time entry was removed in RPMCares. Tenovi's event log is append-only, so the original entry remains on this timeline for audit purposes.",
+    reviewerName,
+  );
 }
 
 // ── HWI API (Api-Key — gateway counts only) ───────────────────────────────
