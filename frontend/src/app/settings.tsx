@@ -16,7 +16,7 @@ import { useTheme } from "@/hooks/use-theme";
 import { api, ApiError } from "@/lib/api";
 
 // ── Tab bar ───────────────────────────────────────────────────────────────
-const TABS = ["Profile", "Organization", "Roles", "Integrations", "Audit"] as const;
+const TABS = ["Profile", "Organization", "Roles", "Audit"] as const;
 type Tab = (typeof TABS)[number];
 
 function TabBar({ active, onChange }: { active: Tab; onChange: (t: Tab) => void }) {
@@ -284,16 +284,13 @@ function ProfileTab() {
         />
       </Card>
 
-      {/* Read-only info */}
-      <Card style={{ gap: 12 }}>
-        <InfoRow icon={ShieldCheck} label="Role" value={ROLE_META[user?.role ?? "staff"].label} colors={colors} />
-        {user?.clinicId && (
-          <>
-            <View style={[styles.infoDivider, { backgroundColor: colors.border }]} />
-            <InfoRow icon={Building2} label="Clinic ID" value={user.clinicId.slice(0, 8) + "…"} colors={colors} />
-          </>
-        )}
-      </Card>
+      {/* Read-only info — Role is already shown in the header, so only
+          surface Clinic ID here, and only when there is one (clinic_admin/staff). */}
+      {user?.clinicId && (
+        <Card style={{ gap: 12 }}>
+          <InfoRow icon={Building2} label="Clinic ID" value={user.clinicId.slice(0, 8) + "…"} colors={colors} />
+        </Card>
+      )}
     </View>
   );
 }
@@ -376,56 +373,6 @@ function RolesTab() {
   );
 }
 
-// ── Integrations tab ──────────────────────────────────────────────────────
-const INTEGRATIONS = [
-  { name: "Smart Meter RPM", desc: "iBP, iGlucose — all 22 clinic keys loaded", status: "connected", icon: "📡" },
-  { name: "Tenovi", desc: "Scale, Pulse Ox, Thermometer, Pillbox", status: "connected", icon: "🔵" },
-  { name: "EHR (Epic)", desc: "FHIR R4 bridge — not yet configured", status: "disconnected", icon: "🏥" },
-  { name: "Twilio", desc: "Voice, SMS, and video communications", status: "connected", icon: "📞" },
-  { name: "Stripe", desc: "Invoicing & ACH payments", status: "disconnected", icon: "💳" },
-  { name: "DocuSign", desc: "Patient consent form delivery", status: "disconnected", icon: "✍️" },
-];
-
-function IntegrationsTab() {
-  const colors = useTheme();
-  return (
-    <View style={{ gap: 10 }}>
-      {INTEGRATIONS.map((item) => {
-        const connected = item.status === "connected";
-        return (
-          <Card key={item.name} style={styles.integrationCard}>
-            <View style={styles.integrationLeft}>
-              <Text style={{ fontSize: 22 }}>{item.icon}</Text>
-              <View style={{ flex: 1 }}>
-                <Text style={[styles.integrationName, { color: colors.text }]}>{item.name}</Text>
-                <Text style={[styles.integrationDesc, { color: colors.textSecondary }]}>{item.desc}</Text>
-              </View>
-            </View>
-            <View style={styles.integrationRight}>
-              <StatusPill tone={connected ? "success" : "muted"}>
-                {connected ? "Connected" : "Not connected"}
-              </StatusPill>
-              <Pressable
-                onPress={() => {
-                  if (connected) {
-                    Alert.alert(item.name, `${item.name} is active and sending data. Contact your administrator to rotate credentials.`);
-                  } else {
-                    Alert.alert(item.name, "Contact your RPMCares administrator to set up this integration.");
-                  }
-                }}
-                style={[styles.integrationBtn, { borderColor: colors.border, backgroundColor: colors.card }]}>
-                <Text style={[styles.integrationBtnText, { color: colors.text }]}>
-                  {connected ? "Manage" : "Connect"}
-                </Text>
-              </Pressable>
-            </View>
-          </Card>
-        );
-      })}
-    </View>
-  );
-}
-
 // ── Audit tab ─────────────────────────────────────────────────────────────
 function AuditTab() {
   const colors = useTheme();
@@ -474,7 +421,6 @@ export default function SettingsScreen() {
         {activeTab === "Profile" && <ProfileTab />}
         {activeTab === "Organization" && <OrganizationTab />}
         {activeTab === "Roles" && <RolesTab />}
-        {activeTab === "Integrations" && <IntegrationsTab />}
         {activeTab === "Audit" && <AuditTab />}
       </View>
     </ScrollView>
