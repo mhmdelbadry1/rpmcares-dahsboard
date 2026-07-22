@@ -1,6 +1,7 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
 import { findPatientById, findPatientByPhone } from "../models/patient";
+import { findProfileById } from "../models/profile";
 import { recordReviewTime, updateReviewTimeSummary } from "../services/review-time";
 import { transcribeAndSummarizeCall, geminiConfigured } from "../services/gemini";
 import {
@@ -15,6 +16,16 @@ export async function listCommunications(req: Request, res: Response): Promise<v
   const profile = req.profile!;
   const { patientId, limit = "100" } = req.query as Record<string, string>;
 
+  // Non-super_admins are scoped to their own clinic — for a specific patient
+  // this also blocks viewing another clinic's patient by guessing their ID.
+  if (patientId && profile.role !== "super_admin" && profile.clinic_id) {
+    const patient = await findPatientById(patientId);
+    if (patient && patient.clinic_id !== profile.clinic_id) {
+      res.status(403).json({ error: "Access denied." });
+      return;
+    }
+  }
+
   let q = supabaseAdmin
     .from("communications_log")
     .select("*, profiles!communications_log_staff_id_fkey(name)")
@@ -22,7 +33,7 @@ export async function listCommunications(req: Request, res: Response): Promise<v
     .limit(parseInt(limit));
 
   if (patientId) q = q.eq("patient_id", patientId);
-  else if (profile.role === "clinic_admin" && profile.clinic_id) q = q.eq("clinic_id", profile.clinic_id);
+  else if (profile.role !== "super_admin" && profile.clinic_id) q = q.eq("clinic_id", profile.clinic_id);
 
   const { data, error } = await q;
   if (error) { res.status(500).json({ error: error.message }); return; }
@@ -110,21 +121,21 @@ export async function callAccepted(req: Request, res: Response): Promise<void> {
   const { data: pat } = await supabaseAdmin
     .from("patients").select("clinic_id").eq("id", patient_id).maybeSingle();
 
-  const { data, error } = await supabaseAdmin
-    .from("communications_log")
-    .insert({
-      patient_id,
-      clinic_id:        pat?.clinic_id ?? null,
-      staff_id:         profile.id,
-      comm_type:        "call",
-      direction:        "inbound",
-      duration_seconds: null, // filled in by dial-status once the call ends
-      summary:          "Inbound call",
-      twilio_sid,
-      occurred_at:      new Date().toISOString(),
-    })
-    .select()
-    .single();
+  // Upserts atomically keyed on twilio_sid — if the dial-status webhook
+  // already finalized this call (race: a very short call can end and fire
+  // its webhook before this request lands), this only fills in staff_id and
+  // never clobbers the already-final duration_seconds/summary. p_is_final
+  // false means "don't touch duration/summary if the row already exists".
+  const { data, error } = await supabaseAdmin.rpc("upsert_inbound_call_leg", {
+    p_twilio_sid:       twilio_sid,
+    p_patient_id:       patient_id,
+    p_clinic_id:        pat?.clinic_id ?? null,
+    p_staff_id:         profile.id,
+    p_duration_seconds: null,
+    p_summary:          "Inbound call",
+    p_occurred_at:      new Date().toISOString(),
+    p_is_final:         false,
+  }).single();
 
   if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(201).json({ log: data });
@@ -190,60 +201,55 @@ export async function dialStatusCallback(req: Request, res: Response): Promise<v
     : "Missed call";
 
   if (from) {
-    // If the answering browser already created a row for this call (via
-    // /call-accepted at accept-time, which is how we know WHO answered),
-    // update it with the final duration instead of inserting a duplicate.
-    const { data: existingRows, error: updateError } = await supabaseAdmin
-      .from("communications_log")
-      .update({
-        duration_seconds: answered ? dialDuration : null,
-        summary,
-      })
-      .eq("twilio_sid", callSid)
-      .select("id, patient_id, clinic_id, staff_id, profiles!communications_log_staff_id_fkey(name)")
-      .maybeSingle();
-    if (updateError) console.warn("[dial-status] update failed:", updateError.message);
+    // Same patient lookup regardless of whether /call-accepted already ran —
+    // upsert_inbound_call_leg's ON CONFLICT keeps whichever patient/clinic
+    // was set first, so this is a no-op if the accept-time row already has it.
+    const patient = await findPatientByPhone(from);
 
-    if (existingRows) {
-      console.log("[dial-status] updated existing row for call %s (answered by staff %s)", callSid, existingRows.staff_id);
-      if (answered && dialDuration > 0 && existingRows.staff_id) {
-        const patient = await findPatientById(existingRows.patient_id);
-        const staffName = (existingRows as any).profiles?.name ?? "Staff";
-        if (patient) {
-          recordReviewTime({
-            patient,
-            durationSeconds:    dialDuration,
-            note:               `Inbound call — ${new Date().toLocaleDateString()}`,
-            patientInteraction: true,
-            loggedByName:       staffName,
-            staffId:            existingRows.staff_id,
-            source:             "call",
-            callDirection:      "inbound",
-            commLogId:          existingRows.id,
-          }).catch((e) => console.warn("[dial-status] review-time record failed:", e));
+    if (patient) {
+      // Atomically create-or-finalize this call's row keyed on twilio_sid.
+      // p_is_final=true means THIS write's duration_seconds/summary always
+      // wins — it's the real, authoritative outcome from Twilio, so unlike
+      // the old code, a race where this fires before /call-accepted's insert
+      // lands no longer mislabels an answered call as "Missed call".
+      const { data, error } = await supabaseAdmin.rpc("upsert_inbound_call_leg", {
+        p_twilio_sid:       callSid || null,
+        p_patient_id:       patient.id,
+        p_clinic_id:        patient.clinic_id ?? null,
+        p_staff_id:         null,
+        p_duration_seconds: answered ? dialDuration : null,
+        p_summary:          summary,
+        p_occurred_at:      new Date().toISOString(),
+        p_is_final:         true,
+      }).single();
+      const row = data as { id: string; staff_id: string | null } | null;
+
+      if (error || !row) {
+        console.warn("[dial-status] upsert failed:", error?.message);
+      } else {
+        console.log("[dial-status] finalized call %s (answered by staff %s)", callSid, row.staff_id);
+        if (answered && dialDuration > 0 && row.staff_id) {
+          const [staffName, fullPatient] = await Promise.all([
+            findProfileById(row.staff_id).then((p) => p?.name ?? "Staff"),
+            findPatientById(patient.id),
+          ]);
+          if (fullPatient) {
+            recordReviewTime({
+              patient:            fullPatient,
+              durationSeconds:    dialDuration,
+              note:               `Inbound call — ${new Date().toLocaleDateString()}`,
+              patientInteraction: true,
+              loggedByName:       staffName,
+              staffId:            row.staff_id,
+              source:             "call",
+              callDirection:      "inbound",
+              commLogId:          row.id,
+            }).catch((e) => console.warn("[dial-status] review-time record failed:", e));
+          }
         }
       }
     } else {
-      // No accept-time row exists — call was never answered (rang out / no browser accepted).
-      const patient = await findPatientByPhone(from);
-
-      if (patient) {
-        const { error } = await supabaseAdmin.from("communications_log").insert({
-          patient_id:       patient.id,
-          clinic_id:        patient.clinic_id ?? null,
-          staff_id:         null,
-          comm_type:        "call",
-          direction:        "inbound",
-          duration_seconds: null,
-          summary:          "Missed call",
-          twilio_sid:       callSid || null,
-          occurred_at:      new Date().toISOString(),
-        });
-        if (error) console.warn("[dial-status] missed-call insert failed:", error.message);
-        else console.log("[dial-status] logged missed call for patient %s", patient.id);
-      } else {
-        console.log("[dial-status] no patient found for", from);
-      }
+      console.log("[dial-status] no patient found for", from);
     }
   }
 
@@ -351,10 +357,13 @@ export async function markRead(req: Request, res: Response): Promise<void> {
 // GET /api/communications/unread
 
 export async function getUnreadCounts(req: Request, res: Response): Promise<void> {
-  const staffId = req.profile!.id;
+  const profile = req.profile!;
 
   const { data, error } = await supabaseAdmin
-    .rpc("get_comm_summaries", { p_staff_id: staffId });
+    .rpc("get_comm_summaries", {
+      p_staff_id:  profile.id,
+      p_clinic_id: profile.role === "super_admin" ? null : profile.clinic_id,
+    });
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
@@ -594,4 +603,22 @@ export async function outboundDialStatusCallback(req: Request, res: Response): P
   }
 
   res.type("text/xml").send("<Response/>");
+}
+
+// ── Twilio: voice fallback ─────────────────────────────────────────────────
+// POST /api/communications/voice-fallback   (PUBLIC — Twilio calls this)
+// Configured as the Voice Fallback URL on both the TwiML App (outbound) and
+// the phone number (inbound) — Twilio calls this instead of playing its own
+// generic "an application error has occurred" message whenever the primary
+// voice webhook fails to respond (5xx, timeout, deploy restart, etc).
+
+export async function voiceFallbackWebhook(_req: Request, res: Response): Promise<void> {
+  const { VoiceResponse } = (await import("twilio")).default.twiml;
+  const response = new VoiceResponse();
+  response.say(
+    { voice: "Polly.Joanna" },
+    "This number is not available right now. Please call back later, or send a text message.",
+  );
+  response.hangup();
+  res.type("text/xml").send(response.toString());
 }

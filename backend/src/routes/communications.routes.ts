@@ -10,6 +10,7 @@ import {
   recordingStatusCallback,
   dialStatusCallback,
   outboundDialStatusCallback,
+  voiceFallbackWebhook,
   markRead,
   getUnreadCounts,
   callAccepted,
@@ -34,3 +35,4 @@ communicationsRouter.post("/inbound-sms",        inboundSmsWebhook);
 communicationsRouter.post("/recording-status",   recordingStatusCallback);
 communicationsRouter.post("/dial-status",        dialStatusCallback);
 communicationsRouter.post("/outbound-dial-status", outboundDialStatusCallback);
+communicationsRouter.post("/voice-fallback",        voiceFallbackWebhook);
