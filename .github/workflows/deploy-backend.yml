@@ -81,3 +81,12 @@ jobs:
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
+
+            # Traefik (shared with the n8n stack) reverse-proxies api.rpmcares.com
+            # to this container by name over the docker network. It's been
+            # observed to get stuck on the old container after this replaces it —
+            # requests hang past the TLS handshake until Traefik is restarted —
+            # so restart it here every deploy rather than requiring a manual fix.
+            if docker ps --format '{{.Names}}' | grep -qx 'n8n-traefik-1'; then
+              docker restart n8n-traefik-1
+            fi

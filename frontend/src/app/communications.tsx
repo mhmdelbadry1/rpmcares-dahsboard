@@ -116,20 +116,28 @@ function Bubble({
 }) {
   const isCall = log.comm_type === 'call';
   const out    = log.direction === 'outbound';
-  const missed = !out && log.duration_seconds == null; // null = missed; 0 = answered (very short)
+  // The backend (call-accepted / dial-status webhooks) is the only source
+  // that knows the call's true state, and already writes the correct label
+  // into `summary` at every stage — "Inbound call"/"Outbound call" while
+  // still in progress (duration not known yet), "Missed call"/"No answer"/
+  // "Canceled"/"Busy"/"Call failed" once it's ended unanswered, or "... ·
+  // m:ss" once answered and ended. Re-deriving this from duration_seconds
+  // alone doesn't work — duration is legitimately null both while a call is
+  // still ringing/active AND once it's permanently missed, so that used to
+  // render every in-progress call as "Missed call" until it finished.
+  const inProgress  = log.summary === 'Inbound call' || log.summary === 'Outbound call';
+  const notAnswered = !inProgress && log.duration_seconds == null;
 
   if (isCall) {
-    const CallIcon  = missed ? PhoneMissed : PhoneCall;
-    const iconClr   = missed ? '#ef4444' : (out ? '#22c55e' : '#94a3b8');
-    const iconBg    = missed ? '#fee2e233' : (out ? '#22c55e22' : '#64748b22');
-    const labelClr  = missed ? '#dc2626' : (out ? '#15803d' : '#64748b');
-    const label     = missed
-      ? 'Missed call'
-      : `${out ? 'Outbound' : 'Inbound'} call${log.duration_seconds ? ` · ${fmtDuration(log.duration_seconds)}` : ' · No answer'}`;
+    const CallIcon  = notAnswered ? PhoneMissed : PhoneCall;
+    const iconClr   = notAnswered ? '#ef4444' : (out ? '#22c55e' : '#94a3b8');
+    const iconBg    = notAnswered ? '#fee2e233' : (out ? '#22c55e22' : '#64748b22');
+    const labelClr  = notAnswered ? '#dc2626' : (out ? '#15803d' : '#64748b');
+    const label     = log.summary || `${out ? 'Outbound' : 'Inbound'} call`;
     // A recorded call with no summary yet is being transcribed in the
     // background (Gemini finishes seconds after recording-status fires) —
     // show that it's in progress instead of just... nothing.
-    const isGenerating = !missed && !!log.recording_url && !log.ai_summary;
+    const isGenerating = !notAnswered && !!log.recording_url && !log.ai_summary;
     return (
       <View style={{ maxWidth: '78%', alignSelf: out ? 'flex-end' : 'flex-start', marginBottom: 8, paddingHorizontal: 16 }}>
         <View style={bub.callCard}>
@@ -138,7 +146,7 @@ function Bubble({
               <CallIcon size={14} color={iconClr} />
             </View>
             <View style={{ flex: 1 }}>
-              {!missed && log.staff_name && (
+              {!notAnswered && log.staff_name && (
                 <Text style={bub.senderName}>{log.staff_name}</Text>
               )}
               <Text style={[bub.callLabel, { color: labelClr }]}>{label}</Text>

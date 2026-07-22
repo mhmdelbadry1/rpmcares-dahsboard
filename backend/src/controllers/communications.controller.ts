@@ -559,9 +559,16 @@ export async function outboundDialStatusCallback(req: Request, res: Response): P
 
   if (patientId) {
     const patient = await findPatientById(patientId);
-    const summary = answered && dialDuration > 0
-      ? `Outbound call · ${Math.floor(dialDuration / 60)}:${String(dialDuration % 60).padStart(2, "0")}`
-      : "Outbound call · No answer";
+    // DialCallStatus distinguishes *why* it wasn't answered — "canceled" means
+    // the staff member hung up before the patient's phone was reached at all
+    // (different from "no-answer", which means it rang out unanswered).
+    const outcome = answered && dialDuration > 0
+      ? `${Math.floor(dialDuration / 60)}:${String(dialDuration % 60).padStart(2, "0")}`
+      : dialStatus === "canceled" ? "Canceled"
+      : dialStatus === "busy"     ? "Busy"
+      : dialStatus === "failed"   ? "Call failed"
+      : "No answer";
+    const summary = `Outbound call · ${outcome}`;
 
     let staffName = "Staff";
     if (staffId) {
