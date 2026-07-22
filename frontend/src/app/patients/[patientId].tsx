@@ -18,7 +18,7 @@ import { useTheme } from '@/hooks/use-theme';
 import {
   api,
   type AlertEvent, type AlertStatus, type DetectedImei, type Member, type PatientDevice,
-  type Patient, type PatientReading, type ReviewTimeEntry,
+  type Patient, type PatientReading, type ReviewTimeEntry, type CareNote,
   type ReadingType, type SmartMeterDetail, type SmartMeterAddress,
   type PatientReport, type CarePlan, type BillingCycleReport, type ExportedBillingReport,
 } from '@/lib/api';
@@ -932,13 +932,17 @@ const SOURCE_META: Record<string, { label: string; color: string }> = {
   manual:          { label: 'Manual',     color: '#7C3AED' },
   profile_view:    { label: 'Profile View', color: '#059669' },
   n8n_agent:       { label: 'Agent',      color: '#D97706' },
+  call:            { label: 'Call',       color: '#0EA5E9' },
 };
 
-function SourceBadge({ source }: { source: string }) {
+function SourceBadge({ source, callDirection }: { source: string; callDirection?: string | null }) {
   const meta = SOURCE_META[source] ?? { label: source, color: '#6B7280' };
+  const label = source === 'call' && callDirection
+    ? `${meta.label} · ${callDirection === 'inbound' ? 'Inbound' : 'Outbound'}`
+    : meta.label;
   return (
     <View style={[rv.sourceBadge, { backgroundColor: meta.color + '18' }]}>
-      <Text style={[rv.sourceText, { color: meta.color }]}>{meta.label}</Text>
+      <Text style={[rv.sourceText, { color: meta.color }]}>{label}</Text>
     </View>
   );
 }
@@ -1109,6 +1113,102 @@ function ManualReviewModal({
   );
 }
 
+// ── Notes Tab ──────────────────────────────────────────────────────────────
+
+function NotesTab({ patientId, colors }: { patientId: string; colors: any }) {
+  const { session } = useAuth();
+  const [notes, setNotes]     = useState<CareNote[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError]     = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!session) return;
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    api.listNotes(session.token, { patientId })
+      .then((r) => { if (!cancelled) setNotes(r.notes); })
+      .catch((e) => { if (!cancelled) setError(e?.message ?? 'Failed to load notes'); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, [session, patientId]);
+
+  if (loading) {
+    return (
+      <Card style={{ alignItems: 'center', paddingVertical: 36, gap: 8 }}>
+        <ActivityIndicator color={colors.primary} />
+        <Text style={[rv.emptyBody, { color: colors.textSecondary }]}>Loading notes…</Text>
+      </Card>
+    );
+  }
+
+  if (error) {
+    return (
+      <Card style={{ alignItems: 'center', paddingVertical: 36, gap: 8 }}>
+        <AlertTriangle size={22} color="#DC2626" />
+        <Text style={[rv.emptyTitle, { color: colors.text }]}>Could not load notes</Text>
+        <Text style={[rv.emptyBody, { color: colors.textSecondary }]}>{error}</Text>
+      </Card>
+    );
+  }
+
+  if (notes.length === 0) {
+    return (
+      <Card style={{ alignItems: 'center', paddingVertical: 36, gap: 8 }}>
+        <FileText size={26} color={colors.textSecondary} />
+        <Text style={[rv.emptyTitle, { color: colors.text }]}>No Notes Yet</Text>
+        <Text style={[rv.emptyBody, { color: colors.textSecondary }]}>
+          AI call summaries and clinical notes will appear here.
+        </Text>
+      </Card>
+    );
+  }
+
+  return (
+    <View style={{ gap: 10 }}>
+      {notes.map((note) => {
+        const content = note.content as { summary?: string; call_direction?: string };
+        return (
+          <Card key={note.id} style={{ gap: 8, borderColor: colors.border }}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+              {note.ai_generated && (
+                <View style={[nv.badge, { backgroundColor: '#0EA5E918' }]}>
+                  <Sparkles size={10} color="#0EA5E9" />
+                  <Text style={[nv.badgeText, { color: '#0EA5E9' }]}>AI Generated</Text>
+                </View>
+              )}
+              {note.note_type === 'call_summary' && content.call_direction && (
+                <View style={[nv.badge, { backgroundColor: '#7C3AED18' }]}>
+                  <Text style={[nv.badgeText, { color: '#7C3AED' }]}>
+                    {content.call_direction === 'inbound' ? 'Inbound Call' : 'Outbound Call'}
+                  </Text>
+                </View>
+              )}
+              <Text style={[nv.date, { color: colors.textSecondary }]}>
+                {fmtReviewDate(note.created_at)}
+              </Text>
+            </View>
+            <Text style={[nv.body, { color: colors.text }]}>
+              {content.summary ?? 'No summary available.'}
+            </Text>
+            <Text style={[nv.author, { color: colors.textSecondary }]}>
+              {note.author_name ? `Logged by ${note.author_name}` : ''}
+            </Text>
+          </Card>
+        );
+      })}
+    </View>
+  );
+}
+
+const nv = StyleSheet.create({
+  badge:     { flexDirection: 'row', alignItems: 'center', gap: 4, borderRadius: 999, paddingHorizontal: 7, paddingVertical: 3 },
+  badgeText: { fontSize: 10, fontWeight: '700' },
+  date:      { fontSize: 11, marginLeft: 'auto' },
+  body:      { fontSize: 13.5, lineHeight: 19 },
+  author:    { fontSize: 11.5, fontStyle: 'italic' },
+});
+
 function ReviewTimeTab({
   patientId, colors, onNewEntry,
 }: { patientId: string; colors: any; onNewEntry?: (entry: ReviewTimeEntry) => void }) {
@@ -1234,7 +1334,7 @@ function ReviewTimeTab({
                 <Text style={[rv.cellDate, { color: colors.text }]}>
                   {fmtReviewDate(entry.clock_start)}
                 </Text>
-                <SourceBadge source={entry.source ?? 'smartmeter_sync'} />
+                <SourceBadge source={entry.source ?? 'smartmeter_sync'} callDirection={entry.call_direction} />
                 {entry.patient_interaction && (
                   <View style={rv.interactionBadge}>
                     <Text style={rv.interactionText}>Patient Contact</Text>
@@ -2964,13 +3064,7 @@ export default function PatientDetail() {
       )}
 
       {tab === 'Notes' && (
-        <Card style={{ alignItems: 'center', paddingVertical: 36, gap: 8 }}>
-          <FileText size={26} color={colors.textSecondary} />
-          <Text style={{ color: colors.text, fontSize: 14, fontWeight: '700' }}>Clinical Notes</Text>
-          <Text style={{ color: colors.textSecondary, fontSize: 12.5, textAlign: 'center' }}>
-            Time-tracked SOAP notes and provider sign-offs coming soon.
-          </Text>
-        </Card>
+        <NotesTab patientId={patient.id} colors={colors} />
       )}
 
       {tab === 'Review Time' && (

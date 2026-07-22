@@ -26,11 +26,11 @@ import {
   getSmartMeterPatientReadingDetail,
   getSmartMeterReviewTime,
   deleteSmartMeterReviewTime,
-  getSmartMeterManualReview,
   deactivateSmartMeterPatient,
   type SmartMeterPatientDetail,
 } from "../services/smartmeter";
 import { getTenoviPatientReadings } from "../services/patient-readings";
+import { recordReviewTime } from "../services/review-time";
 
 export async function list(req: Request, res: Response) {
   const profile = await findProfileById(req.auth!.sub);
@@ -684,41 +684,17 @@ export async function logManualReview(req: Request, res: Response) {
     return res.status(403).json({ error: "Access denied." });
   }
 
-  const clockStart = new Date().toISOString();
   const loggedBy = (profile as any)?.name ?? "Staff";
 
-  // For SmartMeter patients: also post to SmartMeter API best-effort
-  let smReviewTimeId: number | null = null;
-  if (patient.source === "smartmeter") {
-    const apiKey = await getApiKey(patient.clinic_id);
-    if (apiKey) {
-      try {
-        const result = await getSmartMeterManualReview(
-          apiKey, patient.external_patient_id, clockStart, duration_seconds,
-          note ?? null, patient_interaction ?? false,
-        );
-        smReviewTimeId = result?.review_time_id ?? null;
-      } catch (e) {
-        console.warn("[manual-review] SmartMeter post failed:", e);
-      }
-    }
-  }
-
-  const { data: entry } = await supabaseAdmin
-    .from("patient_review_times")
-    .insert({
-      patient_id:          id,
-      sm_review_time_id:   smReviewTimeId,
-      clock_start:         clockStart,
-      duration_seconds,
-      note:                note ?? null,
-      patient_interaction: patient_interaction ?? false,
-      logged_by:           loggedBy,
-      synced_at:           clockStart,
-      source:              "manual",
-    })
-    .select("*")
-    .single();
+  const entry = await recordReviewTime({
+    patient,
+    durationSeconds:     duration_seconds,
+    note:                note ?? null,
+    patientInteraction:  patient_interaction ?? false,
+    loggedByName:        loggedBy,
+    staffId:             profile?.id ?? null,
+    source:              "manual",
+  });
 
   return res.json({ ok: true, entry });
 }

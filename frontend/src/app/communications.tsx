@@ -537,6 +537,16 @@ export default function CommunicationsScreen() {
     const call = inboundCallRef.current;
     if (!call) return;
     call.accept();
+
+    // Tell the server WE are the browser that answered — the shared
+    // "rpmcares_inbound" Twilio identity means the dial-status webhook alone
+    // can't tell which staff member picked up. ParentCallSid is injected into
+    // the TwiML as a custom <Parameter> (the Client leg's own CallSid differs).
+    const parentCallSid = call.customParameters?.get?.('ParentCallSid');
+    if (token && incomingInfo?.patientId && parentCallSid) {
+      api.callAccepted(token, { patient_id: incomingInfo.patientId, twilio_sid: parentCallSid }).catch(() => {});
+    }
+
     setInboundState('active');
     inboundDurRef.current = 0;
     setInboundDuration(0);
@@ -555,7 +565,7 @@ export default function CommunicationsScreen() {
       inboundDurRef.current = 0;
       refreshUnread();
     });
-  }, [refreshUnread]);
+  }, [refreshUnread, token, incomingInfo]);
 
   const rejectInbound = useCallback(() => {
     inboundCallRef.current?.reject();

@@ -40,6 +40,8 @@ const envSchema = z.object({
   // Publicly reachable URL for Twilio callbacks (ngrok in dev, real domain in prod).
   // Falls back to APP_BASE_URL if not set.
   PUBLIC_URL: z.string().url().optional(),
+  // Gemini (AI Studio) — call transcription/summary. Optional: feature no-ops without it.
+  GEMINI_API_KEY: z.string().optional(),
 });
 
 export const env = envSchema.parse(process.env);

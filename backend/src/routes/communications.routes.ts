@@ -11,6 +11,7 @@ import {
   dialStatusCallback,
   markRead,
   getUnreadCounts,
+  callAccepted,
 } from "../controllers/communications.controller";
 import { requireAuth, requireRole } from "../middleware/auth.middleware";
 
@@ -24,6 +25,7 @@ communicationsRouter.get("/token",          requireAuth, staff, getVoiceToken);
 communicationsRouter.get("/inbound-token",  requireAuth, staff, getInboundToken);
 communicationsRouter.post("/sms",       requireAuth, staff, sendSmsHandler);
 communicationsRouter.post("/mark-read", requireAuth, staff, markRead);
+communicationsRouter.post("/call-accepted", requireAuth, staff, callAccepted);
 communicationsRouter.get("/unread",     requireAuth, staff, getUnreadCounts);
 // Public — Twilio calls these webhooks with no auth header
 communicationsRouter.post("/twiml",              twimlVoiceWebhook);

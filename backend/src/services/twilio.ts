@@ -84,14 +84,22 @@ export function generateInboundToken(): string {
 // TwiML that routes an inbound PSTN call to registered browser clients.
 // The <Dial action> URL fires after the call ends — that handler does the logging.
 // Patient info is looked up on the client side from call.parameters.From.
-export function buildInboundRouteTwiml(actionUrl: string): string {
-  const safeUrl = actionUrl.replace(/&/g, "&amp;");
+//
+// parentCallSid is injected as a <Parameter> so whichever browser tab accepts
+// the call knows which parent call it belongs to (the browser's own Client
+// leg has a different CallSid) — used to attribute review time to the
+// specific staff member who answered.
+export function buildInboundRouteTwiml(actionUrl: string, parentCallSid: string, recordingStatusCallbackUrl: string): string {
+  const safeAction = actionUrl.replace(/&/g, "&amp;");
+  const safeRecording = recordingStatusCallbackUrl.replace(/&/g, "&amp;");
+  const safeSid = parentCallSid.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     "<Response>",
-    `  <Dial timeout="20" action="${safeUrl}" method="POST">`,
+    `  <Dial timeout="20" action="${safeAction}" method="POST" record="record-from-answer" recordingStatusCallback="${safeRecording}" recordingStatusCallbackMethod="POST">`,
     "    <Client>",
     "      <Identity>rpmcares_inbound</Identity>",
+    `      <Parameter name="ParentCallSid" value="${safeSid}" />`,
     "    </Client>",
     "  </Dial>",
     "</Response>",

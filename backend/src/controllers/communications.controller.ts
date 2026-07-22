@@ -1,6 +1,8 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
-import { evaluatePatientBilling } from "../services/billing-engine";
+import { findPatientById } from "../models/patient";
+import { recordReviewTime } from "../services/review-time";
+import { transcribeAndSummarizeCall, geminiConfigured } from "../services/gemini";
 import {
   generateVoiceToken, generateInboundToken,
   sendSms, buildDialTwiml, buildInboundRouteTwiml, twilioConfigured,
@@ -40,7 +42,7 @@ export async function createCommunication(req: Request, res: Response): Promise<
   const profile = req.profile!;
   const {
     patient_id, clinic_id, comm_type, direction,
-    duration_seconds, summary, transcript, occurred_at, program, twilio_sid,
+    duration_seconds, summary, transcript, occurred_at, twilio_sid,
   } = req.body;
 
   if (!patient_id) {
@@ -48,13 +50,8 @@ export async function createCommunication(req: Request, res: Response): Promise<
     return;
   }
 
-  let resolvedClinicId: string | null = clinic_id ?? profile.clinic_id ?? null;
-  // super_admin has no clinic_id — fall back to the patient's own clinic_id
-  if (!resolvedClinicId) {
-    const { data: pat } = await supabaseAdmin
-      .from("patients").select("clinic_id").eq("id", patient_id).single();
-    resolvedClinicId = pat?.clinic_id ?? null;
-  }
+  const patient = await findPatientById(patient_id);
+  const resolvedClinicId: string | null = clinic_id ?? profile.clinic_id ?? patient?.clinic_id ?? null;
   const occurredAt = occurred_at ?? new Date().toISOString();
 
   const { data, error } = await supabaseAdmin
@@ -76,20 +73,59 @@ export async function createCommunication(req: Request, res: Response): Promise<
 
   if (error) { res.status(500).json({ error: error.message }); return; }
 
-  if (duration_seconds && duration_seconds > 0) {
-    await supabaseAdmin.from("time_logs").insert({
-      patient_id,
-      clinic_id:       resolvedClinicId,
-      staff_id:        profile.id,
-      program:         program ?? "RPM",
-      activity_type:   "call",
-      duration_seconds,
-      notes:           `${comm_type ?? "call"} — ${new Date(occurredAt).toLocaleDateString()}`,
-      logged_at:       occurredAt,
-    });
-    evaluatePatientBilling(patient_id).catch(console.warn);
+  if ((comm_type ?? "call") === "call" && duration_seconds && duration_seconds > 0 && patient) {
+    recordReviewTime({
+      patient,
+      durationSeconds:    duration_seconds,
+      note:               `Outbound call — ${new Date(occurredAt).toLocaleDateString()}`,
+      patientInteraction: true,
+      loggedByName:       profile.name ?? "Staff",
+      staffId:            profile.id,
+      source:             "call",
+      callDirection:      "outbound",
+    }).catch((e) => console.warn("[create-communication] review-time record failed:", e));
   }
 
+  res.status(201).json({ log: data });
+}
+
+// ── Inbound call answered ───────────────────────────────────────────────────
+// POST /api/communications/call-accepted
+// Called by the browser the instant it accepts an incoming call — this is
+// how we know WHICH staff member answered (all browsers share the same
+// "rpmcares_inbound" Twilio identity, so the server-side dial-status webhook
+// has no way to tell them apart on its own). twilio_sid is the call's
+// ParentCallSid, injected into the TwiML as a <Parameter> — NOT the browser
+// Client leg's own CallSid, which is a different value.
+
+export async function callAccepted(req: Request, res: Response): Promise<void> {
+  const profile = req.profile!;
+  const { patient_id, twilio_sid } = req.body as { patient_id?: string; twilio_sid?: string };
+  if (!patient_id || !twilio_sid) {
+    res.status(400).json({ error: "patient_id and twilio_sid are required." });
+    return;
+  }
+
+  const { data: pat } = await supabaseAdmin
+    .from("patients").select("clinic_id").eq("id", patient_id).maybeSingle();
+
+  const { data, error } = await supabaseAdmin
+    .from("communications_log")
+    .insert({
+      patient_id,
+      clinic_id:        pat?.clinic_id ?? null,
+      staff_id:         profile.id,
+      comm_type:        "call",
+      direction:        "inbound",
+      duration_seconds: null, // filled in by dial-status once the call ends
+      summary:          "Inbound call",
+      twilio_sid,
+      occurred_at:      new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (error) { res.status(500).json({ error: error.message }); return; }
   res.status(201).json({ log: data });
 }
 
@@ -145,45 +181,79 @@ export async function dialStatusCallback(req: Request, res: Response): Promise<v
 
   console.log("[dial-status] from=%s sid=%s status=%s duration=%d", from, callSid, dialStatus, dialDuration);
 
+  // Twilio sends DialCallStatus="completed" when a <Client> answers and the
+  // call ends normally. "answered" is never sent for <Client> dials.
+  const answered = dialStatus === "completed" || dialStatus === "answered";
+  const summary   = answered
+    ? `Inbound call${dialDuration ? ` · ${Math.floor(dialDuration / 60)}:${String(dialDuration % 60).padStart(2, "0")}` : ""}`
+    : "Missed call";
+
   if (from) {
-    const digits = from.replace(/\D/g, "");
-    const last10 = digits.slice(-10);
-    const e164   = `+${digits}`;
-
-    const { data: exact } = await supabaseAdmin
-      .from("patients").select("id, clinic_id").eq("phone", e164).limit(1);
-    let patient: { id: any; clinic_id: any } | null = (exact ?? [])[0] ?? null;
-
-    if (!patient) {
-      const { data: all } = await supabaseAdmin
-        .from("patients").select("id, clinic_id, phone").not("phone", "is", null).limit(5000);
-      patient = (all ?? []).find((p: any) => p.phone.replace(/\D/g, "").slice(-10) === last10) ?? null;
-    }
-
-    if (patient) {
-      // Twilio sends DialCallStatus="completed" when a <Client> answers and the
-      // call ends normally. "answered" is never sent for <Client> dials.
-      const answered = dialStatus === "completed" || dialStatus === "answered";
-      const summary  = answered
-        ? `Inbound call${dialDuration ? ` · ${Math.floor(dialDuration / 60)}:${String(dialDuration % 60).padStart(2, "0")}` : ""}`
-        : "Missed call";
-      const { error } = await supabaseAdmin.from("communications_log").insert({
-        patient_id:       patient.id,
-        clinic_id:        patient.clinic_id ?? null,
-        staff_id:         null,
-        comm_type:        "call",
-        direction:        "inbound",
-        // Store 0 (not null) for answered calls with zero measured duration so the
-        // frontend can distinguish answered-calls from missed-calls via null check.
+    // If the answering browser already created a row for this call (via
+    // /call-accepted at accept-time, which is how we know WHO answered),
+    // update it with the final duration instead of inserting a duplicate.
+    const { data: existingRows, error: updateError } = await supabaseAdmin
+      .from("communications_log")
+      .update({
         duration_seconds: answered ? dialDuration : null,
         summary,
-        twilio_sid:       callSid || null,
-        occurred_at:      new Date().toISOString(),
-      });
-      if (error) console.warn("[dial-status] log insert failed:", error.message);
-      else console.log("[dial-status] logged %s inbound call for patient %s", answered ? "answered" : "missed", patient.id);
+      })
+      .eq("twilio_sid", callSid)
+      .select("id, patient_id, clinic_id, staff_id, profiles!communications_log_staff_id_fkey(name)")
+      .maybeSingle();
+    if (updateError) console.warn("[dial-status] update failed:", updateError.message);
+
+    if (existingRows) {
+      console.log("[dial-status] updated existing row for call %s (answered by staff %s)", callSid, existingRows.staff_id);
+      if (answered && dialDuration > 0 && existingRows.staff_id) {
+        const patient = await findPatientById(existingRows.patient_id);
+        const staffName = (existingRows as any).profiles?.name ?? "Staff";
+        if (patient) {
+          recordReviewTime({
+            patient,
+            durationSeconds:    dialDuration,
+            note:               `Inbound call — ${new Date().toLocaleDateString()}`,
+            patientInteraction: true,
+            loggedByName:       staffName,
+            staffId:            existingRows.staff_id,
+            source:             "call",
+            callDirection:      "inbound",
+          }).catch((e) => console.warn("[dial-status] review-time record failed:", e));
+        }
+      }
     } else {
-      console.log("[dial-status] no patient found for", from);
+      // No accept-time row exists — call was never answered (rang out / no browser accepted).
+      const digits = from.replace(/\D/g, "");
+      const last10 = digits.slice(-10);
+      const e164   = `+${digits}`;
+
+      const { data: exact } = await supabaseAdmin
+        .from("patients").select("id, clinic_id").eq("phone", e164).limit(1);
+      let patient: { id: any; clinic_id: any } | null = (exact ?? [])[0] ?? null;
+
+      if (!patient) {
+        const { data: all } = await supabaseAdmin
+          .from("patients").select("id, clinic_id, phone").not("phone", "is", null).limit(5000);
+        patient = (all ?? []).find((p: any) => p.phone.replace(/\D/g, "").slice(-10) === last10) ?? null;
+      }
+
+      if (patient) {
+        const { error } = await supabaseAdmin.from("communications_log").insert({
+          patient_id:       patient.id,
+          clinic_id:        patient.clinic_id ?? null,
+          staff_id:         null,
+          comm_type:        "call",
+          direction:        "inbound",
+          duration_seconds: null,
+          summary:          "Missed call",
+          twilio_sid:       callSid || null,
+          occurred_at:      new Date().toISOString(),
+        });
+        if (error) console.warn("[dial-status] missed-call insert failed:", error.message);
+        else console.log("[dial-status] logged missed call for patient %s", patient.id);
+      } else {
+        console.log("[dial-status] no patient found for", from);
+      }
     }
   }
 
@@ -384,18 +454,50 @@ export async function inboundSmsWebhook(req: Request, res: Response): Promise<vo
 
 // ── Twilio: recording status callback ─────────────────────────────────────
 // POST /api/communications/recording-status   (PUBLIC — Twilio calls this)
-// Fires when a call recording is ready. Stores the recording URL in transcript.
+// Fires when a call recording is ready. Stores the recording URL, then
+// (best-effort, non-blocking) transcribes + summarizes it via Gemini and
+// saves the summary as an AI-generated care note.
 
 export async function recordingStatusCallback(req: Request, res: Response): Promise<void> {
   const callSid: string      = req.body?.CallSid       ?? "";
   const recordingUrl: string = req.body?.RecordingUrl  ?? "";
 
   if (callSid && recordingUrl) {
-    await supabaseAdmin
+    const { data: row, error } = await supabaseAdmin
       .from("communications_log")
-      .update({ transcript: `${recordingUrl}.mp3` })
+      .update({ recording_url: recordingUrl })
       .eq("twilio_sid", callSid)
-      .then(({ error }) => { if (error) console.warn("[recording-status] update failed:", error.message); });
+      .select("id, patient_id, clinic_id, staff_id, direction")
+      .maybeSingle();
+    if (error) console.warn("[recording-status] update failed:", error.message);
+
+    // Twilio only waits ~15s for this response before retrying the webhook —
+    // acknowledge immediately and do the slow AI work after responding.
+    res.sendStatus(204);
+
+    if (row && geminiConfigured()) {
+      transcribeAndSummarizeCall(recordingUrl)
+        .then(async (result) => {
+          if (!result) return;
+          await supabaseAdmin
+            .from("communications_log")
+            .update({ transcript: result.transcript })
+            .eq("id", row.id);
+          await supabaseAdmin.from("care_notes").insert({
+            patient_id:      row.patient_id,
+            clinic_id:       row.clinic_id,
+            author_id:       row.staff_id,
+            note_type:       "call_summary",
+            content:         { summary: result.summary, call_direction: row.direction },
+            ai_generated:    true,
+            ai_generated_at: new Date().toISOString(),
+            status:          "draft",
+          });
+          console.log("[recording-status] transcript + AI summary saved for call %s", callSid);
+        })
+        .catch((e) => console.warn("[recording-status] transcription failed:", e));
+    }
+    return;
   }
 
   res.sendStatus(204);
@@ -407,8 +509,9 @@ export async function recordingStatusCallback(req: Request, res: Response): Prom
 // This returns TwiML telling Twilio to dial that number.
 
 export async function twimlVoiceWebhook(req: Request, res: Response): Promise<void> {
-  const to   = (req.body?.To   ?? req.body?.to   ?? "") as string;
-  const from = (req.body?.From ?? req.body?.from ?? "") as string;
+  const to     = (req.body?.To     ?? req.body?.to     ?? "") as string;
+  const from   = (req.body?.From   ?? req.body?.from   ?? "") as string;
+  const callSid = (req.body?.CallSid ?? "") as string;
 
   const { VoiceResponse } = (await import("twilio")).default.twiml;
 
@@ -433,9 +536,11 @@ export async function twimlVoiceWebhook(req: Request, res: Response): Promise<vo
       if (patient) {
         // Known patient — ring all registered browser tabs simultaneously.
         // Logging (answered vs missed) is handled by the dial-status callback.
-        const actionUrl = `${env.PUBLIC_URL ?? env.APP_BASE_URL}/api/communications/dial-status`;
+        const base = env.PUBLIC_URL ?? env.APP_BASE_URL;
+        const actionUrl = `${base}/api/communications/dial-status`;
+        const recordingUrl = `${base}/api/communications/recording-status`;
         console.log("[twiml] routing inbound call from patient %s to rpmcares_inbound", patient.id);
-        res.type("text/xml").send(buildInboundRouteTwiml(actionUrl));
+        res.type("text/xml").send(buildInboundRouteTwiml(actionUrl, callSid, recordingUrl));
         return;
       }
 

@@ -358,7 +358,8 @@ export type ReviewTimeEntry = {
   note: string | null;
   patient_interaction: boolean;
   logged_by: string | null;
-  source: string;               // 'smartmeter_sync' | 'manual' | 'profile_view' | 'n8n_agent'
+  source: string;               // 'smartmeter_sync' | 'manual' | 'profile_view' | 'n8n_agent' | 'call'
+  call_direction: 'inbound' | 'outbound' | null;
   synced_at: string;
   created_at: string;
 };
@@ -890,9 +891,11 @@ export const api = {
   },
   createCommunication: (token: string, log: {
     patient_id: string; comm_type?: string; direction?: string;
-    duration_seconds?: number; summary?: string; occurred_at?: string; program?: string;
+    duration_seconds?: number; summary?: string; occurred_at?: string;
     twilio_sid?: string;
   }) => request<{ log: CommLog }>('/api/communications', { method: 'POST', body: JSON.stringify(log) }, token),
+  callAccepted: (token: string, payload: { patient_id: string; twilio_sid: string }) =>
+    request<{ log: CommLog }>('/api/communications/call-accepted', { method: 'POST', body: JSON.stringify(payload) }, token),
   getVoiceToken: (token: string) =>
     request<{ token: string }>('/api/communications/token', { method: 'GET' }, token),
   getInboundToken: (token: string) =>

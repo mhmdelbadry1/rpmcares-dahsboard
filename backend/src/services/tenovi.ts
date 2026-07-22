@@ -129,6 +129,77 @@ async function rpmFetch<T>(url: string, retry = true): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// ── RPM API POST (Token auth, retry-once-on-401) ──────────────────────────
+
+async function rpmPost<T>(path: string, body: object, retry = true): Promise<T> {
+  const token = await getRpmToken();
+  const res = await fetch(`${TENOVI_BASE}/clients/rpmcares${path}`, {
+    method: "POST",
+    headers: {
+      Authorization: `Token ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+  if (res.status === 401 && retry) {
+    _rpmToken = null;
+    _rpmTokenExpiry = 0;
+    return rpmPost<T>(path, body, false);
+  }
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`Tenovi RPM POST ${path} → ${res.status}: ${text.slice(0, 300)}`);
+  }
+  return res.json() as Promise<T>;
+}
+
+// ── Push real review time to Tenovi's own clinical record ─────────────────
+// Mirrors the "Started/Ended Patient Review" event pair + review-log entry
+// that Tenovi's own portal UI creates when a clinician logs review time.
+// module picks the RPM vs RTM endpoint family — Tenovi's API has no combined
+// "either" endpoint, so a patient enrolled in both needs both calls.
+
+export async function postTenoviReviewTime(
+  externalPatientId: string,
+  module: "RPM" | "RTM",
+  durationSeconds: number,
+  note: string,
+  reviewerName: string,
+): Promise<{ eventEndId: string | null; reviewLogId: string | null }> {
+  // Tenovi's actual paths (verified against the RPM/RTM API):
+  //   RPM events:      /patients/{id}/events/                 (no rpm/ prefix)
+  //   RPM review log:  /rpm/patients/{id}/rpm-review-logs/
+  //   RTM events:      /rtm/patients/{id}/events/
+  //   RTM review log:  /rtm/patients/{id}/rtm-review-logs/
+  const startEventUrl = module === "RTM" ? "/rtm/patients" : "/patients";
+  const logUrl = module === "RTM"
+    ? `/rtm/patients/${externalPatientId}/rtm-review-logs/`
+    : `/rpm/patients/${externalPatientId}/rpm-review-logs/`;
+
+  let eventEndId: string | null = null;
+  let reviewLogId: string | null = null;
+
+  try {
+    await rpmPost(`${startEventUrl}/${externalPatientId}/events/`, {
+      patient: externalPatientId, created_by: reviewerName, details: "", title: "Started Patient Review",
+    });
+    const endEvent = await rpmPost<{ id?: string | number }>(`${startEventUrl}/${externalPatientId}/events/`, {
+      patient: externalPatientId, created_by: reviewerName, details: note, title: "Ended Patient Review",
+    });
+    eventEndId = endEvent?.id != null ? String(endEvent.id) : null;
+
+    const log = await rpmPost<{ id?: string | number }>(logUrl, {
+      review_time: durationSeconds, reviewer: reviewerName,
+    });
+    reviewLogId = log?.id != null ? String(log.id) : null;
+  } catch (err) {
+    console.warn(`[tenovi] review-time push failed for patient ${externalPatientId} (${module}):`, err);
+  }
+
+  return { eventEndId, reviewLogId };
+}
+
 // ── HWI API (Api-Key — gateway counts only) ───────────────────────────────
 
 function hwiBase(): string {
