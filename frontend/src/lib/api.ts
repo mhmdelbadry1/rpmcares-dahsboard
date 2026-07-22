@@ -383,6 +383,8 @@ export type CommLog = {
   duration_seconds: number | null;
   summary: string | null;
   transcript: string | null;
+  recording_url: string | null;
+  ai_summary: string | null;
   twilio_sid: string | null;
   occurred_at: string;
   created_at: string;

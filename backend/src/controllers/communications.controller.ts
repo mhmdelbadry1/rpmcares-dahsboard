@@ -481,7 +481,7 @@ export async function recordingStatusCallback(req: Request, res: Response): Prom
           if (!result) return;
           await supabaseAdmin
             .from("communications_log")
-            .update({ transcript: result.transcript })
+            .update({ transcript: result.transcript, ai_summary: result.summary })
             .eq("id", row.id);
           await supabaseAdmin.from("care_notes").insert({
             patient_id:      row.patient_id,

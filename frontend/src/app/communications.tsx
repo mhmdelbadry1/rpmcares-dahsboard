@@ -1,15 +1,15 @@
 import {
-  AlertCircle, CheckCheck, ChevronDown, Clock,
+  AlertCircle, CheckCheck, ChevronDown, ChevronRight, Clock,
   Mic, MicOff, Phone, PhoneCall, PhoneIncoming, PhoneMissed, PhoneOff,
-  Search, Send, X, MessageSquare,
+  Search, Send, X, MessageSquare, Sparkles,
 } from 'lucide-react-native';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ActivityIndicator, FlatList, KeyboardAvoidingView,
+  ActivityIndicator, Animated, FlatList, KeyboardAvoidingView,
   Modal, Platform, Pressable, StyleSheet,
   Text, TextInput, View,
 } from 'react-native';
-import { useLocalSearchParams } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useAuth } from '@/contexts/auth-context';
 import { useUnread } from '@/contexts/unread-context';
 import { api, type CommLog, type Patient } from '@/lib/api';
@@ -126,18 +126,26 @@ function Bubble({
     const label     = missed
       ? 'Missed call'
       : `${out ? 'Outbound' : 'Inbound'} call${log.duration_seconds ? ` · ${fmtDuration(log.duration_seconds)}` : ' · No answer'}`;
+    // A recorded call with no summary yet is being transcribed in the
+    // background (Gemini finishes seconds after recording-status fires) —
+    // show that it's in progress instead of just... nothing.
+    const isGenerating = !missed && !!log.recording_url && !log.ai_summary;
     return (
-      <View style={[bub.callRow, out ? bub.callOut : bub.callIn]}>
-        <View style={[bub.callIcon, { backgroundColor: iconBg }]}>
-          <CallIcon size={14} color={iconClr} />
+      <View style={{ gap: 6, maxWidth: '78%', alignSelf: out ? 'flex-end' : 'flex-start' }}>
+        <View style={[bub.callRow, out ? bub.callOut : bub.callIn]}>
+          <View style={[bub.callIcon, { backgroundColor: iconBg }]}>
+            <CallIcon size={14} color={iconClr} />
+          </View>
+          <View>
+            {out && log.staff_name && (
+              <Text style={bub.senderName}>{log.staff_name}</Text>
+            )}
+            <Text style={[bub.callLabel, { color: labelClr }]}>{label}</Text>
+            <Text style={bub.callTime}>{fmtTime(log.occurred_at)}</Text>
+          </View>
         </View>
-        <View>
-          {out && log.staff_name && (
-            <Text style={bub.senderName}>{log.staff_name}</Text>
-          )}
-          <Text style={[bub.callLabel, { color: labelClr }]}>{label}</Text>
-          <Text style={bub.callTime}>{fmtTime(log.occurred_at)}</Text>
-        </View>
+        {isGenerating && <AiSummaryGenerating />}
+        {!!log.ai_summary && <AiSummaryCard summary={log.ai_summary} />}
       </View>
     );
   }
@@ -187,6 +195,114 @@ function Bubble({
   );
 }
 
+// ── AI call summary — generating state ──────────────────────────────────────
+// Shown the moment a recording lands, while Gemini transcribes + summarizes
+// in the background (a few seconds). Turns into <AiSummaryCard> live via the
+// communications_log realtime UPDATE subscription once ai_summary lands.
+
+function AiSummaryGenerating() {
+  const pulse = useRef(new Animated.Value(0.4)).current;
+  const dot1  = useRef(new Animated.Value(0)).current;
+  const dot2  = useRef(new Animated.Value(0)).current;
+  const dot3  = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulse, { toValue: 1,   duration: 700, useNativeDriver: true }),
+        Animated.timing(pulse, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ]),
+    );
+    loop.start();
+    const dotLoop = (v: Animated.Value, delay: number) => Animated.loop(
+      Animated.sequence([
+        Animated.delay(delay),
+        Animated.timing(v, { toValue: 1, duration: 350, useNativeDriver: true }),
+        Animated.timing(v, { toValue: 0, duration: 350, useNativeDriver: true }),
+      ]),
+    );
+    const d1 = dotLoop(dot1, 0);
+    const d2 = dotLoop(dot2, 150);
+    const d3 = dotLoop(dot3, 300);
+    d1.start(); d2.start(); d3.start();
+    return () => { loop.stop(); d1.stop(); d2.stop(); d3.stop(); };
+  }, [pulse, dot1, dot2, dot3]);
+
+  return (
+    <View style={ai.genCard}>
+      <Animated.View style={{ opacity: pulse }}>
+        <Sparkles size={14} color="#8b5cf6" />
+      </Animated.View>
+      <Text style={ai.genText}>Transcribing &amp; summarizing call</Text>
+      <View style={{ flexDirection: 'row', gap: 2 }}>
+        {[dot1, dot2, dot3].map((v, i) => (
+          <Animated.View
+            key={i}
+            style={[ai.genDot, { opacity: v, transform: [{ translateY: v.interpolate({ inputRange: [0, 1], outputRange: [0, -2] }) }] }]}
+          />
+        ))}
+      </View>
+    </View>
+  );
+}
+
+// ── AI call summary — revealed state ────────────────────────────────────────
+
+function AiSummaryCard({ summary }: { summary: string }) {
+  const reveal = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    Animated.spring(reveal, { toValue: 1, useNativeDriver: true, friction: 7, tension: 60 }).start();
+  }, [reveal]);
+
+  return (
+    <Animated.View
+      style={[
+        ai.card,
+        {
+          opacity: reveal,
+          transform: [
+            { scale: reveal.interpolate({ inputRange: [0, 1], outputRange: [0.94, 1] }) },
+            { translateY: reveal.interpolate({ inputRange: [0, 1], outputRange: [6, 0] }) },
+          ],
+        },
+      ]}
+    >
+      <Sparkles size={64} color="#8b5cf6" style={ai.watermark} />
+      <View style={ai.cardHead}>
+        <View style={ai.cardIconBadge}>
+          <Sparkles size={11} color="#fff" />
+        </View>
+        <Text style={ai.cardTitle}>AI Summary</Text>
+      </View>
+      <Text style={ai.cardBody}>{summary}</Text>
+    </Animated.View>
+  );
+}
+
+const ai = StyleSheet.create({
+  genCard: {
+    flexDirection: 'row', alignItems: 'center', gap: 7,
+    backgroundColor: '#8b5cf60d', borderWidth: 1, borderColor: '#8b5cf62a', borderStyle: 'dashed',
+    borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8,
+  },
+  genText: { fontSize: 11.5, color: '#7c3aed', fontWeight: '600' },
+  genDot:  { width: 4, height: 4, borderRadius: 2, backgroundColor: '#8b5cf6' },
+  card: {
+    backgroundColor: '#faf5ff', borderRadius: 14, padding: 12, paddingRight: 16,
+    borderWidth: 1, borderColor: '#e9d5ff', overflow: 'hidden',
+    shadowColor: '#8b5cf6', shadowOpacity: 0.12, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
+  },
+  watermark:  { position: 'absolute', top: -14, right: -14, opacity: 0.08, transform: [{ rotate: '15deg' }] },
+  cardHead:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
+  cardIconBadge: {
+    width: 18, height: 18, borderRadius: 9, backgroundColor: '#8b5cf6',
+    alignItems: 'center', justifyContent: 'center',
+  },
+  cardTitle: { fontSize: 11, fontWeight: '800', color: '#7c3aed', letterSpacing: 0.3, textTransform: 'uppercase' },
+  cardBody:  { fontSize: 13, lineHeight: 19, color: '#3b0764' },
+});
+
 const bub = StyleSheet.create({
   row:              { marginBottom: 8, paddingHorizontal: 16 },
   rowOut:           { alignItems: 'flex-end' },
@@ -221,6 +337,7 @@ const bub = StyleSheet.create({
 export default function CommunicationsScreen() {
   const { session } = useAuth();
   const token       = session?.token ?? null;
+  const router      = useRouter();
   const params      = useLocalSearchParams<{ patientId?: string; action?: string }>();
   const { counts: unreadCounts, markRead, markAllRead, refresh: refreshUnread } = useUnread();
 
@@ -354,8 +471,11 @@ export default function CommunicationsScreen() {
     return () => clearInterval(t);
   }, [selected?.id, loadLogs]);
 
-  // ── Supabase Realtime — instant push for any INSERT on communications_log ──
-  // Subscribes per selected patient; no polling needed at all.
+  // ── Supabase Realtime — instant push for any INSERT/UPDATE on communications_log ──
+  // Subscribes per selected patient; no polling needed at all. UPDATE is what
+  // lands the AI call summary in place once Gemini finishes transcribing —
+  // the row starts as just the call metadata and gets ai_summary filled in
+  // seconds later, and this is how the "Generating…" bubble turns real.
   useEffect(() => {
     if (!selected) return;
 
@@ -380,6 +500,19 @@ export default function CommunicationsScreen() {
             return [...pending, incoming, ...rest];
           });
           markRead(selected.id).catch(() => {});
+        },
+      )
+      .on(
+        'postgres_changes',
+        {
+          event:  'UPDATE',
+          schema: 'public',
+          table:  'communications_log',
+          filter: `patient_id=eq.${selected.id}`,
+        },
+        (payload) => {
+          const updated = payload.new as CommLog;
+          setLogs(prev => prev.map(l => (l.id === updated.id ? { ...l, ...updated } : l)));
         },
       )
       .subscribe();
@@ -962,18 +1095,23 @@ export default function CommunicationsScreen() {
 
           {/* Convo header */}
           <View style={s.convoHeader}>
-            <View style={s.convoHeaderLeft}>
+            <Pressable
+              style={s.convoHeaderLeft}
+              onPress={() => router.push(`/patients/${selected.id}`)}
+              hitSlop={4}
+            >
               <Avatar name={selected.full_name} size={38} />
               <View style={{ marginLeft: 10 }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                  <Text style={s.convoName}>{selected.full_name}</Text>
+                  <Text style={[s.convoName, s.convoNameLink]}>{selected.full_name}</Text>
+                  <ChevronRight size={14} color="#9ca3af" />
                   <View style={[s.sourceBadge, selected.source === 'tenovi' ? s.sourceBadgeTenovi : s.sourceBadgeSM]}>
                     <Text style={s.sourceBadgeText}>{selected.source === 'tenovi' ? 'Tenovi' : 'SmartMeter'}</Text>
                   </View>
                 </View>
                 <Text style={s.convoPhone}>{selected.phone ?? 'No phone on file'}</Text>
               </View>
-            </View>
+            </Pressable>
             {selected.phone && Platform.OS === 'web' && (
               <Pressable
                 style={[s.callBtn,
@@ -1253,6 +1391,7 @@ const s = StyleSheet.create({
   convoHeader:     { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 20, paddingVertical: 14, borderBottomWidth: 1, borderBottomColor: '#e2e8f0' },
   convoHeaderLeft: { flexDirection: 'row', alignItems: 'center' },
   convoName:       { fontSize: 15, fontWeight: '700', color: '#0f172a' },
+  convoNameLink:   { textDecorationLine: 'underline', textDecorationColor: '#cbd5e1' },
   convoPhone:      { fontSize: 12.5, color: '#64748b', marginTop: 1 },
   callBtn:         { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 20, gap: 6, backgroundColor: '#22c55e' },
   callBtnRed:      { backgroundColor: '#dc2626' },
