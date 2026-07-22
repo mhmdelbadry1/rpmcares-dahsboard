@@ -765,30 +765,27 @@ export default function CommunicationsScreen() {
       const call = await deviceRef.current.connect({ params: { To: selected.phone } });
       callRef.current = call;
 
-      // CallSid is only guaranteed after Twilio accepts the call — capture it then.
-      let capturedSid: string | undefined;
+      // Note: `accept` fires once Twilio bridges media to THIS browser, which
+      // happens before the patient's phone is actually reached — it's a UI
+      // cue only. The persisted call record (answered vs no-answer, duration,
+      // review time) comes from the server-side outbound-dial-status webhook.
       call.on('ringing', () => setCallState('ringing'));
-      call.on('accept', (acceptedCall: any) => {
-        capturedSid = acceptedCall?.parameters?.CallSid ?? call.parameters?.CallSid;
+      call.on('accept', () => {
         setCallState('active');
         timerRef.current = setInterval(() => { callDurRef.current += 1; setCallDuration(callDurRef.current); }, 1000);
       });
 
-      // Logs the call then resets UI. Called by both disconnect and cancel.
+      // Resets UI once the call ends. Called by both disconnect and cancel.
+      // The actual communications_log row (and any review time) is created
+      // server-side by outbound-dial-status — that's the only source that
+      // knows whether the patient's phone truly answered (DialCallStatus),
+      // as opposed to this browser's own `accept` event, which fires once
+      // Twilio bridges media to US and can't tell answered from ringing.
+      // Realtime picks up that server-created row automatically.
       const logAndReset = async () => {
         setCallState('ended');
         if (timerRef.current) clearInterval(timerRef.current);
-        const dur = callDurRef.current;
-        // For cancelled calls (never accepted), try to get SID from the call object directly
-        const sid = capturedSid ?? call.parameters?.CallSid;
-        await api.createCommunication(token, {
-          patient_id: selected.id, comm_type: 'call', direction: 'outbound',
-          duration_seconds: dur || null,
-          summary: `Outbound call${dur ? ` · ${fmtDuration(dur)}` : ' · No answer'}`,
-          twilio_sid: sid || undefined,
-        }).catch(() => {});
-        loadLogs(selected.id, false);
-        refreshUnread();
+        setTimeout(() => { loadLogs(selected.id, false); refreshUnread(); }, 1500);
         setTimeout(() => setCallState('idle'), 2000);
       };
 

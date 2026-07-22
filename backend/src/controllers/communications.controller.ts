@@ -1,6 +1,6 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
-import { findPatientById } from "../models/patient";
+import { findPatientById, findPatientByPhone } from "../models/patient";
 import { recordReviewTime, updateReviewTimeSummary } from "../services/review-time";
 import { transcribeAndSummarizeCall, geminiConfigured } from "../services/gemini";
 import {
@@ -225,19 +225,7 @@ export async function dialStatusCallback(req: Request, res: Response): Promise<v
       }
     } else {
       // No accept-time row exists — call was never answered (rang out / no browser accepted).
-      const digits = from.replace(/\D/g, "");
-      const last10 = digits.slice(-10);
-      const e164   = `+${digits}`;
-
-      const { data: exact } = await supabaseAdmin
-        .from("patients").select("id, clinic_id").eq("phone", e164).limit(1);
-      let patient: { id: any; clinic_id: any } | null = (exact ?? [])[0] ?? null;
-
-      if (!patient) {
-        const { data: all } = await supabaseAdmin
-          .from("patients").select("id, clinic_id, phone").not("phone", "is", null).limit(5000);
-        patient = (all ?? []).find((p: any) => p.phone.replace(/\D/g, "").slice(-10) === last10) ?? null;
-      }
+      const patient = await findPatientByPhone(from);
 
       if (patient) {
         const { error } = await supabaseAdmin.from("communications_log").insert({
@@ -402,31 +390,8 @@ export async function inboundSmsWebhook(req: Request, res: Response): Promise<vo
     return;
   }
 
-  // Normalise to E.164
-  const digits   = from.replace(/\D/g, "");
-  const e164     = from.startsWith("+") ? from.replace(/\D/g, "").replace(/^/, "+") : `+${digits}`;
-  // Last 10 digits — used for fuzzy matching against any stored format (dashes, spaces, etc.)
-  const last10   = digits.slice(-10);
-
-  // 1. Exact E.164 match
-  const { data: exact } = await supabaseAdmin
-    .from("patients")
-    .select("id, clinic_id")
-    .eq("phone", e164)
-    .limit(1);
-
-  let patient = exact?.[0] ?? null;
-
-  if (!patient) {
-    // 2. Load all patients with a phone and compare digits-only (handles any stored format)
-    const { data: all } = await supabaseAdmin
-      .from("patients")
-      .select("id, clinic_id, phone")
-      .not("phone", "is", null)
-      .limit(5000);
-    const match = (all ?? []).find(p => p.phone.replace(/\D/g, "").slice(-10) === last10);
-    patient = match ?? null;
-  }
+  const patient = await findPatientByPhone(from);
+  const e164    = from.startsWith("+") ? from : `+${from.replace(/\D/g, "")}`;
 
   if (patient) {
     const { error } = await supabaseAdmin.from("communications_log").insert({
@@ -443,7 +408,7 @@ export async function inboundSmsWebhook(req: Request, res: Response): Promise<vo
     if (error) console.warn("[inbound-sms] log insert failed:", error.message);
     else console.log("[inbound-sms] saved for patient %s", patient.id);
   } else {
-    console.warn("[inbound-sms] No patient found for", e164, "/ last10", last10);
+    console.warn("[inbound-sms] No patient found for", e164);
     // Auto-reply so the unknown sender knows they reached the wrong line
     const xml = `<?xml version="1.0"?><Response><Message>This number is used by RPMCares clinical staff to contact patients. If you are a patient, please reply from the phone number on file with your clinic.</Message></Response>`;
     res.type("text/xml").status(200).send(xml);
@@ -523,19 +488,7 @@ export async function twimlVoiceWebhook(req: Request, res: Response): Promise<vo
   // The SDK also sends Direction=inbound for outbound calls, so Direction is useless here.
   if (!to || to === env.TWILIO_FROM_NUMBER) {
     if (from) {
-      const digits = from.replace(/\D/g, "");
-      const last10 = digits.slice(-10);
-      const e164   = `+${digits}`;
-
-      const { data: exact } = await supabaseAdmin
-        .from("patients").select("id, clinic_id, full_name").eq("phone", e164).limit(1);
-      let patient: { id: string; clinic_id: string | null; full_name: string } | null = (exact ?? [])[0] ?? null;
-
-      if (!patient) {
-        const { data: all } = await supabaseAdmin
-          .from("patients").select("id, clinic_id, phone, full_name").not("phone", "is", null).limit(5000);
-        patient = (all ?? []).find((p: any) => p.phone.replace(/\D/g, "").slice(-10) === last10) ?? null;
-      }
+      const patient = await findPatientByPhone(from);
 
       if (patient) {
         // Known patient — ring all registered browser tabs simultaneously.
@@ -563,6 +516,82 @@ export async function twimlVoiceWebhook(req: Request, res: Response): Promise<vo
     return;
   }
 
-  const twiml = buildDialTwiml(to);
+  // Outbound: staff browser identity is embedded by Twilio as "client:<staffId>"
+  // (see generateVoiceToken, which uses profile.id as the identity).
+  const staffId  = from.startsWith("client:") ? from.slice("client:".length) : null;
+  const patient  = await findPatientByPhone(to);
+  const base     = env.PUBLIC_URL ?? env.APP_BASE_URL;
+  const params   = new URLSearchParams();
+  if (patient) params.set("patientId", patient.id);
+  if (staffId) params.set("staffId", staffId);
+  const actionUrl = `${base}/api/communications/outbound-dial-status${params.toString() ? `?${params}` : ""}`;
+
+  const twiml = buildDialTwiml(to, actionUrl);
   res.type("text/xml").send(twiml);
+}
+
+// ── Twilio: outbound dial-status callback ──────────────────────────────────
+// POST /api/communications/outbound-dial-status   (PUBLIC — Twilio calls this)
+// Fires after the outbound <Dial> leg ends (see buildDialTwiml). This — not
+// the browser Voice SDK's own `accept` event — is the authoritative source
+// for whether the patient actually answered: `accept` fires as soon as
+// Twilio bridges media to the calling browser, which happens before the
+// dialed phone rings, so a ring-out-to-no-answer still looked "connected"
+// client-side. Mirrors dialStatusCallback's inbound handling.
+
+export async function outboundDialStatusCallback(req: Request, res: Response): Promise<void> {
+  const callSid: string    = req.body?.CallSid        ?? "";
+  const dialStatus: string = req.body?.DialCallStatus  ?? "";
+  const dialDuration       = parseInt(req.body?.DialCallDuration ?? "0", 10) || 0;
+  const { patientId, staffId } = req.query as { patientId?: string; staffId?: string };
+
+  const answered = dialStatus === "completed" || dialStatus === "answered";
+  console.log("[outbound-dial-status] sid=%s status=%s duration=%d patient=%s", callSid, dialStatus, dialDuration, patientId);
+
+  if (patientId) {
+    const patient = await findPatientById(patientId);
+    const summary = answered && dialDuration > 0
+      ? `Outbound call · ${Math.floor(dialDuration / 60)}:${String(dialDuration % 60).padStart(2, "0")}`
+      : "Outbound call · No answer";
+
+    let staffName = "Staff";
+    if (staffId) {
+      const { data: prof } = await supabaseAdmin.from("profiles").select("name").eq("id", staffId).maybeSingle();
+      staffName = prof?.name ?? staffName;
+    }
+
+    const { data: row, error } = await supabaseAdmin
+      .from("communications_log")
+      .insert({
+        patient_id:       patientId,
+        clinic_id:        patient?.clinic_id ?? null,
+        staff_id:         staffId ?? null,
+        comm_type:        "call",
+        direction:        "outbound",
+        duration_seconds: answered && dialDuration > 0 ? dialDuration : null,
+        summary,
+        twilio_sid:       callSid || null,
+        occurred_at:      new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.warn("[outbound-dial-status] insert failed:", error.message);
+    } else if (answered && dialDuration > 0 && staffId && patient) {
+      recordReviewTime({
+        patient,
+        durationSeconds:    dialDuration,
+        note:               `Outbound call — ${new Date().toLocaleDateString()}`,
+        patientInteraction: true,
+        loggedByName:       staffName,
+        staffId,
+        source:             "call",
+        callDirection:      "outbound",
+        commLogId:          row.id,
+      }).catch((e) => console.warn("[outbound-dial-status] review-time record failed:", e));
+    }
+  }
+
+  res.type("text/xml").send("<Response/>");
 }

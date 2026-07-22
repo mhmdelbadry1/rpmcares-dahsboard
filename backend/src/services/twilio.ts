@@ -43,7 +43,15 @@ export async function sendSms(to: string, body: string): Promise<string> {
 // TwiML response body for outbound browser → patient calls.
 // Twilio calls this webhook URL when the browser SDK places a call.
 // The `To` parameter is passed by the SDK in the call params.
-export function buildDialTwiml(to: string): string {
+//
+// The browser Call object's own `accept` event fires as soon as Twilio
+// bridges media to the BROWSER leg (needed to run this TwiML at all) — that
+// happens well before the <Dial> target's phone is actually answered, so it
+// cannot be trusted to tell answered from no-answer/voicemail-timeout. The
+// action URL below is the authoritative source: Twilio calls it once the
+// <Dial> leg ends, with the real DialCallStatus/DialCallDuration — same
+// pattern already used for inbound calls (see buildInboundRouteTwiml).
+export function buildDialTwiml(to: string, actionUrl: string): string {
   const { VoiceResponse } = twilio.twiml;
   const response = new VoiceResponse();
   const dial = response.dial({
@@ -51,6 +59,8 @@ export function buildDialTwiml(to: string): string {
     record: "record-from-answer",
     recordingStatusCallback: `${env.PUBLIC_URL ?? env.APP_BASE_URL}/api/communications/recording-status`,
     recordingStatusCallbackMethod: "POST",
+    action: actionUrl,
+    method: "POST",
   } as any);
   dial.number(to);
   return response.toString();

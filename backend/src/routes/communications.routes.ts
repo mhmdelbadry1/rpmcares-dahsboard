@@ -9,6 +9,7 @@ import {
   inboundSmsWebhook,
   recordingStatusCallback,
   dialStatusCallback,
+  outboundDialStatusCallback,
   markRead,
   getUnreadCounts,
   callAccepted,
@@ -32,3 +33,4 @@ communicationsRouter.post("/twiml",              twimlVoiceWebhook);
 communicationsRouter.post("/inbound-sms",        inboundSmsWebhook);
 communicationsRouter.post("/recording-status",   recordingStatusCallback);
 communicationsRouter.post("/dial-status",        dialStatusCallback);
+communicationsRouter.post("/outbound-dial-status", outboundDialStatusCallback);

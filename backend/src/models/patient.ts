@@ -153,6 +153,25 @@ export async function findPatientById(id: string): Promise<PatientRecord | null>
   return data ? mapRow(data) : null;
 }
 
+// Matches a phone number against patients.phone tolerating differing formats
+// (dashes, spaces, missing country code) by comparing the last 10 digits.
+// Used to resolve inbound Twilio webhooks (calls/SMS), which only give us a
+// raw phone number, back to a patient record.
+export async function findPatientByPhone(phone: string): Promise<{ id: string; clinic_id: string | null } | null> {
+  const digits = phone.replace(/\D/g, "");
+  const last10 = digits.slice(-10);
+  const e164   = `+${digits}`;
+
+  const { data: exact } = await supabaseAdmin
+    .from("patients").select("id, clinic_id").eq("phone", e164).limit(1);
+  if (exact?.[0]) return exact[0];
+
+  const { data: all } = await supabaseAdmin
+    .from("patients").select("id, clinic_id, phone").not("phone", "is", null).limit(5000);
+  const match = (all ?? []).find((p: any) => p.phone.replace(/\D/g, "").slice(-10) === last10);
+  return match ? { id: match.id, clinic_id: match.clinic_id } : null;
+}
+
 export async function deletePatient(id: string): Promise<void> {
   const { error } = await supabaseAdmin.from("patients").delete().eq("id", id);
   if (error) throw error;

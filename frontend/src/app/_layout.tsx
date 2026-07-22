@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 
 import { AnimatedSplashOverlay } from "@/components/animated-icon";
 import { AppDrawerContent } from "@/components/drawer-content";
+import { DrawerMenuButton } from "@/components/drawer-menu-button";
 import { LoginScreen } from "@/components/login-screen";
 import { AuthProvider, useAuth } from "@/contexts/auth-context";
 import { UnreadProvider, useUnread } from "@/contexts/unread-context";
@@ -35,6 +36,7 @@ function DrawerNav() {
         headerTintColor: colors.text,
         headerTitleStyle: { fontWeight: "700", fontSize: 16 },
         headerShadowVisible: false,
+        headerLeft: (props) => <DrawerMenuButton tintColor={props.tintColor} />,
         drawerType: "slide",
         overlayColor: "transparent",
         sceneStyle: { backgroundColor: colors.background },

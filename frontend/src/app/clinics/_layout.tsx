@@ -1,5 +1,5 @@
-import { DrawerToggleButton } from 'expo-router/drawer';
 import { Stack } from 'expo-router';
+import { DrawerMenuButton } from '@/components/drawer-menu-button';
 import { useTheme } from '@/hooks/use-theme';
 
 export default function ClinicsLayout() {
@@ -11,7 +11,7 @@ export default function ClinicsLayout() {
         headerTintColor: colors.text,
         headerTitleStyle: { fontWeight: '700' },
       }}>
-      <Stack.Screen name="index" options={{ title: 'Clinics', headerLeft: () => <DrawerToggleButton tintColor={colors.text} /> }} />
+      <Stack.Screen name="index" options={{ title: 'Clinics', headerLeft: () => <DrawerMenuButton tintColor={colors.text} /> }} />
       <Stack.Screen name="time-reviews" options={{ title: 'Time Reviews' }} />
     </Stack>
   );
