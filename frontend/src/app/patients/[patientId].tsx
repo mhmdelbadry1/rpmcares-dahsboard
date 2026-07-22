@@ -1011,16 +1011,30 @@ function ManualReviewModal({
     } finally { setSaving(false); }
   }
 
+  // Closing the sheet while the live timer has accumulated time (running or
+  // stopped-but-unsaved) must not silently discard it — auto-save it first,
+  // same as the passive profile-view timer does on navigating away.
+  async function handleClose() {
+    if (mode === 'timer' && elapsed >= 1) {
+      if (running) stopTimer();
+      setSaving(true);
+      try {
+        await onSave(elapsed, note, patientInteraction);
+      } finally { setSaving(false); }
+    }
+    onClose();
+  }
+
   const canSave = mode === 'timer' ? elapsed >= 1 : parseFloat(directMins || '0') > 0;
 
   return (
-    <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <Pressable style={rv.backdrop} onPress={onClose}>
+    <Modal visible={visible} transparent animationType="slide" onRequestClose={handleClose}>
+      <Pressable style={rv.backdrop} onPress={handleClose}>
         <Pressable style={[rv.sheet, { backgroundColor: colors.card, borderColor: colors.border }]}>
           {/* Header */}
           <View style={rv.sheetHead}>
             <Text style={[rv.sheetTitle, { color: colors.text }]}>Log Review Time</Text>
-            <Pressable onPress={onClose} hitSlop={10}><X size={18} color={colors.textSecondary} /></Pressable>
+            <Pressable onPress={handleClose} hitSlop={10}><X size={18} color={colors.textSecondary} /></Pressable>
           </View>
 
           {/* Mode switcher */}
@@ -1053,6 +1067,9 @@ function ManualReviewModal({
                   : <><Play size={14} color="#052B00" fill="#052B00" /><Text style={[rv.timerBtnText, { color: '#052B00' }]}>Start</Text></>
                 }
               </Pressable>
+              {elapsed >= 1 && (
+                <Text style={{ fontSize: 11, color: colors.textSecondary }}>Closing this panel saves the timer</Text>
+              )}
             </View>
           )}
 
@@ -1390,7 +1407,7 @@ const rv = StyleSheet.create({
   headerCell:     { fontSize: 10, fontWeight: '700', letterSpacing: 0.4 },
   row:            { flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, alignItems: 'flex-start' },
   colDate:        { flex: 2.2, gap: 3 },
-  colDuration:    { flex: 1.2, alignItems: 'center' },
+  colDuration:    { flex: 1.2, alignItems: 'center', textAlign: 'center' },
   colBy:          { flex: 1.6 },
   cellDate:       { fontSize: 12, fontWeight: '500' },
   interactionBadge: { backgroundColor: '#0284C715', borderRadius: 999, paddingHorizontal: 6, paddingVertical: 2, alignSelf: 'flex-start' },
