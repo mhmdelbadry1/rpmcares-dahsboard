@@ -7,6 +7,7 @@ import { transcribeAndSummarizeCall, geminiConfigured } from "../services/gemini
 import {
   generateVoiceToken, generateInboundToken,
   sendSms, buildDialTwiml, buildInboundRouteTwiml, twilioConfigured,
+  inboundIdentityForClinic, SUPER_ADMIN_INBOUND_IDENTITY,
 } from "../services/twilio";
 import { env } from "../env";
 
@@ -104,8 +105,8 @@ export async function createCommunication(req: Request, res: Response): Promise<
 // ── Inbound call answered ───────────────────────────────────────────────────
 // POST /api/communications/call-accepted
 // Called by the browser the instant it accepts an incoming call — this is
-// how we know WHICH staff member answered (all browsers share the same
-// "rpmcares_inbound" Twilio identity, so the server-side dial-status webhook
+// how we know WHICH staff member answered (every clinic's staff share one
+// Twilio identity for that clinic, so the server-side dial-status webhook
 // has no way to tell them apart on its own). twilio_sid is the call's
 // ParentCallSid, injected into the TwiML as a <Parameter> — NOT the browser
 // Client leg's own CallSid, which is a different value.
@@ -162,17 +163,26 @@ export async function getVoiceToken(req: Request, res: Response): Promise<void> 
 
 // ── Twilio: inbound browser token ─────────────────────────────────────────
 // GET /api/communications/inbound-token
-// Returns a Twilio Access Token for the shared "rpmcares_inbound" identity.
-// All staff browsers register with this token; when a patient calls, every
-// open tab rings simultaneously and the first to accept gets the call.
+// Returns a Twilio Access Token for this staff member's inbound identity —
+// clinic-scoped for clinic_admin/staff (so a call for another clinic's
+// patient never rings their browser), or the shared super-admin identity
+// (which rings alongside every clinic's, so super admins see every call).
 
 export async function getInboundToken(req: Request, res: Response): Promise<void> {
   if (!twilioConfigured()) {
     res.status(503).json({ error: "Twilio is not configured." });
     return;
   }
+  const profile = req.profile!;
+  if (profile.role !== "super_admin" && !profile.clinic_id) {
+    res.status(400).json({ error: "No clinic assigned — cannot receive inbound calls." });
+    return;
+  }
+  const identity = profile.role === "super_admin"
+    ? SUPER_ADMIN_INBOUND_IDENTITY
+    : inboundIdentityForClinic(profile.clinic_id!);
   try {
-    const token = generateInboundToken();
+    const token = generateInboundToken(identity);
     res.json({ token });
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
@@ -500,13 +510,13 @@ export async function twimlVoiceWebhook(req: Request, res: Response): Promise<vo
       const patient = await findPatientByPhone(from);
 
       if (patient) {
-        // Known patient — ring all registered browser tabs simultaneously.
+        // Known patient — ring only that clinic's staff, plus super admins.
         // Logging (answered vs missed) is handled by the dial-status callback.
         const base = env.PUBLIC_URL ?? env.APP_BASE_URL;
         const actionUrl = `${base}/api/communications/dial-status`;
         const recordingUrl = `${base}/api/communications/recording-status`;
-        console.log("[twiml] routing inbound call from patient %s to rpmcares_inbound", patient.id);
-        res.type("text/xml").send(buildInboundRouteTwiml(actionUrl, callSid, recordingUrl));
+        console.log("[twiml] routing inbound call from patient %s to clinic %s", patient.id, patient.clinic_id);
+        res.type("text/xml").send(buildInboundRouteTwiml(actionUrl, callSid, recordingUrl, patient.clinic_id));
         return;
       }
 

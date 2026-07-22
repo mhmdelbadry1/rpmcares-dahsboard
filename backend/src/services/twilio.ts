@@ -66,10 +66,20 @@ export function buildDialTwiml(to: string, actionUrl: string): string {
   return response.toString();
 }
 
-// Generates a short-lived Access Token for the shared inbound listener.
-// All staff browsers register under the same identity ("rpmcares_inbound") so
-// when TwiML dials that identity, every open tab rings simultaneously.
-export function generateInboundToken(): string {
+// Inbound calls ring per-clinic Client identities, not one shared identity —
+// a clinic's staff must never see/hear a ring for another clinic's patient.
+// Super admins additionally ring on a separate identity that's dialed
+// alongside every clinic's, so they see every call regardless of clinic.
+export function inboundIdentityForClinic(clinicId: string): string {
+  return `rpmcares_inbound_clinic_${clinicId}`;
+}
+export const SUPER_ADMIN_INBOUND_IDENTITY = "rpmcares_inbound_superadmin";
+
+// Generates a short-lived Access Token for the inbound listener. `identity`
+// is either a clinic-scoped identity (inboundIdentityForClinic) or
+// SUPER_ADMIN_INBOUND_IDENTITY — see getInboundToken, which picks it based
+// on the requesting staff member's role/clinic.
+export function generateInboundToken(identity: string): string {
   if (!env.TWILIO_ACCOUNT_SID || !env.TWILIO_API_KEY || !env.TWILIO_API_SECRET)
     throw new Error("Twilio Voice Token not configured");
 
@@ -80,7 +90,7 @@ export function generateInboundToken(): string {
     env.TWILIO_ACCOUNT_SID,
     env.TWILIO_API_KEY,
     env.TWILIO_API_SECRET,
-    { identity: "rpmcares_inbound", ttl: 3600 },
+    { identity, ttl: 3600 },
   );
 
   token.addGrant(new VoiceGrant({
@@ -95,22 +105,43 @@ export function generateInboundToken(): string {
 // The <Dial action> URL fires after the call ends — that handler does the logging.
 // Patient info is looked up on the client side from call.parameters.From.
 //
+// Rings the calling patient's clinic identity AND the super-admin identity
+// in parallel <Client> nouns (first to accept wins, same as Twilio's normal
+// simultaneous-ring behavior) — so only that clinic's staff, plus super
+// admins, ever see this call ring. clinicId is null only in the (shouldn't
+// happen) case a patient record has no clinic — falls back to ringing only
+// super admins rather than leaking the call to every clinic.
+//
 // parentCallSid is injected as a <Parameter> so whichever browser tab accepts
 // the call knows which parent call it belongs to (the browser's own Client
 // leg has a different CallSid) — used to attribute review time to the
 // specific staff member who answered.
-export function buildInboundRouteTwiml(actionUrl: string, parentCallSid: string, recordingStatusCallbackUrl: string): string {
+export function buildInboundRouteTwiml(
+  actionUrl: string,
+  parentCallSid: string,
+  recordingStatusCallbackUrl: string,
+  clinicId: string | null,
+): string {
   const safeAction = actionUrl.replace(/&/g, "&amp;");
   const safeRecording = recordingStatusCallbackUrl.replace(/&/g, "&amp;");
   const safeSid = parentCallSid.replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+
+  const identities = [
+    ...(clinicId ? [inboundIdentityForClinic(clinicId)] : []),
+    SUPER_ADMIN_INBOUND_IDENTITY,
+  ];
+  const clients = identities.map((identity) => [
+    "    <Client>",
+    `      <Identity>${identity}</Identity>`,
+    `      <Parameter name="ParentCallSid" value="${safeSid}" />`,
+    "    </Client>",
+  ].join("\n"));
+
   return [
     '<?xml version="1.0" encoding="UTF-8"?>',
     "<Response>",
     `  <Dial timeout="20" action="${safeAction}" method="POST" record="record-from-answer" recordingStatusCallback="${safeRecording}" recordingStatusCallbackMethod="POST">`,
-    "    <Client>",
-    "      <Identity>rpmcares_inbound</Identity>",
-    `      <Parameter name="ParentCallSid" value="${safeSid}" />`,
-    "    </Client>",
+    ...clients,
     "  </Dial>",
     "</Response>",
   ].join("\n");

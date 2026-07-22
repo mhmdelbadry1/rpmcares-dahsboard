@@ -597,10 +597,12 @@ export default function CommunicationsScreen() {
   }, [initDevice]);
 
   // ── Inbound device ────────────────────────────────────────────────────────
-  // Registers a shared "rpmcares_inbound" browser client so all open tabs
-  // ring when a patient calls. Uses window.CustomEvent to bridge from the
-  // Twilio SDK callback into React — avoiding stale-closure issues from
-  // Expo fast-refresh. Cancellation flag ensures StrictMode double-invoke is safe.
+  // Registers this browser under its clinic-scoped (or super-admin) Twilio
+  // identity — see getInboundToken — so it only rings for calls belonging
+  // to patients in its own clinic (super admins ring for every clinic).
+  // Uses window.CustomEvent to bridge from the Twilio SDK callback into
+  // React — avoiding stale-closure issues from Expo fast-refresh.
+  // Cancellation flag ensures StrictMode double-invoke is safe.
   useEffect(() => {
     if (!token || Platform.OS !== 'web') return;
     let cancelled = false;
@@ -656,7 +658,7 @@ export default function CommunicationsScreen() {
 
       if (cancelled) { dev.unregister?.(); dev.destroy(); return; }
       inboundDevRef.current = dev;
-      console.log('[inbound-device] registered as rpmcares_inbound — ready to receive calls');
+      console.log('[inbound-device] registered — ready to receive calls');
     })();
 
     return () => {
@@ -700,10 +702,11 @@ export default function CommunicationsScreen() {
     if (!call) return;
     call.accept();
 
-    // Tell the server WE are the browser that answered — the shared
-    // "rpmcares_inbound" Twilio identity means the dial-status webhook alone
-    // can't tell which staff member picked up. ParentCallSid is injected into
-    // the TwiML as a custom <Parameter> (the Client leg's own CallSid differs).
+    // Tell the server WE are the browser that answered — every staff member
+    // sharing this clinic's (or super-admin's) Twilio identity means the
+    // dial-status webhook alone can't tell which one picked up. ParentCallSid
+    // is injected into the TwiML as a custom <Parameter> (the Client leg's
+    // own CallSid differs).
     const parentCallSid = call.customParameters?.get?.('ParentCallSid');
     if (token && incomingInfo?.patientId && parentCallSid) {
       api.callAccepted(token, { patient_id: incomingInfo.patientId, twilio_sid: parentCallSid }).catch(() => {});
