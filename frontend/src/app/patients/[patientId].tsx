@@ -1227,14 +1227,19 @@ const nv = StyleSheet.create({
 });
 
 function ReviewTimeTab({
-  patientId, colors, onNewEntry,
-}: { patientId: string; colors: any; onNewEntry?: (entry: ReviewTimeEntry) => void }) {
+  patientId, colors, onNewEntry, onViewNote,
+}: {
+  patientId: string; colors: any;
+  onNewEntry?: (entry: ReviewTimeEntry) => void;
+  onViewNote?: (commLogId: string) => void;
+}) {
   const { session } = useAuth();
   const role = session?.user.role;
   const canDelete = role === 'super_admin' || role === 'clinic_admin' || role === 'staff';
   const canLog    = role === 'super_admin' || role === 'clinic_admin' || role === 'staff';
 
   const [entries, setEntries] = useState<ReviewTimeEntry[]>([]);
+  const [notedCommLogIds, setNotedCommLogIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -1248,6 +1253,11 @@ function ReviewTimeTab({
       .then((r) => setEntries(r.reviewTimes))
       .catch((e) => setError(e?.message ?? 'Failed to load review time'))
       .finally(() => setLoading(false));
+    // Best-effort — a review-time entry just renders without a "View Note"
+    // link if this fails, no need to block the tab on it.
+    api.listNotes(session.token, { patientId })
+      .then((r) => setNotedCommLogIds(new Set(r.notes.map((n) => n.comm_log_id).filter((id): id is string => !!id))))
+      .catch(() => {});
   }, [session, patientId]);
 
   useEffect(() => { loadEntries(); }, [loadEntries]);
@@ -1383,9 +1393,17 @@ function ReviewTimeTab({
                 )}
               </View>
               {!!entry.note && (
-                <Text style={[rv.noteText, { color: colors.textSecondary, borderTopColor: colors.border }]}>
-                  {entry.note}
-                </Text>
+                <View style={[rv.noteWrap, { borderTopColor: colors.border }]}>
+                  <Text style={[rv.noteText, { color: colors.textSecondary }]}>
+                    {entry.note}
+                  </Text>
+                  {!!entry.comm_log_id && notedCommLogIds.has(entry.comm_log_id) && (
+                    <Pressable onPress={() => onViewNote?.(entry.comm_log_id!)} style={rv.viewNoteBtn}>
+                      <FileText size={11} color={colors.primary} />
+                      <Text style={[rv.viewNoteText, { color: colors.primary }]}>View note</Text>
+                    </Pressable>
+                  )}
+                </View>
               )}
             </View>
           ))}
@@ -1414,7 +1432,10 @@ const rv = StyleSheet.create({
   headerCell:     { fontSize: 10, fontWeight: '700', letterSpacing: 0.4 },
   rowWrap:        { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, overflow: 'hidden' },
   row:            { flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10, alignItems: 'flex-start' },
-  noteText:       { fontSize: 12, lineHeight: 17, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth },
+  noteWrap:       { paddingHorizontal: 12, paddingBottom: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth, gap: 6 },
+  noteText:       { fontSize: 12, lineHeight: 17 },
+  viewNoteBtn:    { flexDirection: 'row', alignItems: 'center', gap: 4, alignSelf: 'flex-start' },
+  viewNoteText:   { fontSize: 11.5, fontWeight: '700' },
   colDate:        { flex: 2.2, gap: 3 },
   colDuration:    { flex: 1.2, alignItems: 'center', textAlign: 'center' },
   colBy:          { flex: 1.6 },
@@ -3094,7 +3115,7 @@ export default function PatientDetail() {
       )}
 
       {tab === 'Review Time' && (
-        <ReviewTimeTab patientId={patient.id} colors={colors} />
+        <ReviewTimeTab patientId={patient.id} colors={colors} onViewNote={() => setTab('Notes')} />
       )}
 
       {tab === 'Report' && (

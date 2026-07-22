@@ -494,6 +494,7 @@ export async function recordingStatusCallback(req: Request, res: Response): Prom
             ai_generated:    true,
             ai_generated_at: new Date().toISOString(),
             status:          "draft",
+            comm_log_id:     row.id,
           });
           await updateReviewTimeSummary(row.id, result.summary);
           console.log("[recording-status] transcript + AI summary saved for call %s", callSid);

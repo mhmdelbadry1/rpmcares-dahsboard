@@ -345,6 +345,7 @@ export type CareNote = {
   signed_at: string | null;
   dos: string | null;
   cycle_start: string | null;
+  comm_log_id: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -360,6 +361,7 @@ export type ReviewTimeEntry = {
   logged_by: string | null;
   source: string;               // 'smartmeter_sync' | 'manual' | 'profile_view' | 'n8n_agent' | 'call'
   call_direction: 'inbound' | 'outbound' | null;
+  comm_log_id: string | null;
   synced_at: string;
   created_at: string;
 };
