@@ -121,12 +121,20 @@ export async function updateReviewTimeSummary(commLogId: string, summary: string
     const apiKey = await getSmartMeterApiKey(patient.clinic_id);
     if (apiKey) {
       try {
-        await deleteSmartMeterReviewTime(apiKey, patient.external_patient_id, entry.sm_review_time_id);
+        // Create the replacement BEFORE deleting the placeholder — if the
+        // create fails (as it can: SmartMeter rejects the DB's stored
+        // timestamp format, needs re-normalizing through toISOString()),
+        // the original entry survives instead of the review time vanishing.
         const result = await getSmartMeterManualReview(
-          apiKey, patient.external_patient_id, entry.clock_start, entry.duration_seconds,
+          apiKey, patient.external_patient_id, new Date(entry.clock_start).toISOString(), entry.duration_seconds,
           summary, entry.patient_interaction,
         );
-        newSmReviewTimeId = result?.review_time_id ?? null;
+        if (result?.review_time_id) {
+          await deleteSmartMeterReviewTime(apiKey, patient.external_patient_id, entry.sm_review_time_id);
+          newSmReviewTimeId = result.review_time_id;
+        } else {
+          console.warn("[review-time] SmartMeter recreate returned no id — keeping original entry");
+        }
       } catch (e) {
         console.warn("[review-time] SmartMeter note update failed:", e);
       }

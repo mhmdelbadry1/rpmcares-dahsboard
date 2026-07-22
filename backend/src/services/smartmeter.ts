@@ -743,7 +743,9 @@ export async function getSmartMeterManualReview(
     return null;
   }
   const body = await res.json().catch(() => ({})) as any;
-  return body?.data?.review_time_id != null ? { review_time_id: body.data.review_time_id } : null;
+  // Same shape as the GET endpoint — data.review_times[], not data.review_time_id directly.
+  const created = body?.data?.review_times?.[0];
+  return created?.review_time_id != null ? { review_time_id: created.review_time_id } : null;
 }
 
 // ── SKU catalog ───────────────────────────────────────────────────────────
