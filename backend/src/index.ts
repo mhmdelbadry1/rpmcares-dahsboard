@@ -23,6 +23,13 @@ import { reportsRouter } from "./routes/reports.routes";
 
 const app = express();
 
+// Behind Traefik in production — trust exactly one hop so req.ip (and
+// express-rate-limit's keying) uses the real client IP from X-Forwarded-For
+// instead of Traefik's own container IP. Without this, every request looked
+// like it came from the same IP, so the 120 req/min API limiter below was
+// effectively a single shared budget across every user of the app combined.
+app.set("trust proxy", 1);
+
 app.use(cors({ origin: env.CORS_ORIGIN }));
 app.use(express.json());
 app.use(express.urlencoded({ extended: false })); // Twilio webhooks POST as x-www-form-urlencoded
