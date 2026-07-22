@@ -200,6 +200,27 @@ export async function postTenoviReviewTime(
   return { eventEndId, reviewLogId };
 }
 
+// Tenovi's events endpoint is append-only — there's no way to edit the
+// "Ended Patient Review" event's details after the fact. When the AI call
+// summary lands (seconds after the review-time push above, once Gemini
+// finishes), this posts it as a distinct supplementary event on the same
+// patient timeline rather than silently leaving the placeholder note.
+export async function postTenoviCallSummaryEvent(
+  externalPatientId: string,
+  module: "RPM" | "RTM",
+  summary: string,
+  reviewerName: string,
+): Promise<void> {
+  const eventUrl = module === "RTM" ? "/rtm/patients" : "/patients";
+  try {
+    await rpmPost(`${eventUrl}/${externalPatientId}/events/`, {
+      patient: externalPatientId, created_by: reviewerName, details: summary, title: "AI Call Summary",
+    });
+  } catch (err) {
+    console.warn(`[tenovi] AI call summary event failed for patient ${externalPatientId} (${module}):`, err);
+  }
+}
+
 // ── HWI API (Api-Key — gateway counts only) ───────────────────────────────
 
 function hwiBase(): string {

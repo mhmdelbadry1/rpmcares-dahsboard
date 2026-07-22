@@ -131,21 +131,33 @@ function Bubble({
     // show that it's in progress instead of just... nothing.
     const isGenerating = !missed && !!log.recording_url && !log.ai_summary;
     return (
-      <View style={{ gap: 6, maxWidth: '78%', alignSelf: out ? 'flex-end' : 'flex-start' }}>
-        <View style={[bub.callRow, out ? bub.callOut : bub.callIn]}>
-          <View style={[bub.callIcon, { backgroundColor: iconBg }]}>
-            <CallIcon size={14} color={iconClr} />
+      <View style={{ maxWidth: '78%', alignSelf: out ? 'flex-end' : 'flex-start', marginBottom: 8, paddingHorizontal: 16 }}>
+        <View style={bub.callCard}>
+          <View style={bub.callCardHead}>
+            <View style={[bub.callIcon, { backgroundColor: iconBg }]}>
+              <CallIcon size={14} color={iconClr} />
+            </View>
+            <View style={{ flex: 1 }}>
+              {!missed && log.staff_name && (
+                <Text style={bub.senderName}>{log.staff_name}</Text>
+              )}
+              <Text style={[bub.callLabel, { color: labelClr }]}>{label}</Text>
+              <Text style={bub.callTime}>{fmtTime(log.occurred_at)}</Text>
+            </View>
           </View>
-          <View>
-            {out && log.staff_name && (
-              <Text style={bub.senderName}>{log.staff_name}</Text>
-            )}
-            <Text style={[bub.callLabel, { color: labelClr }]}>{label}</Text>
-            <Text style={bub.callTime}>{fmtTime(log.occurred_at)}</Text>
-          </View>
+          {isGenerating && (
+            <>
+              <View style={bub.callCardDivider} />
+              <AiSummaryGenerating inline />
+            </>
+          )}
+          {!!log.ai_summary && (
+            <>
+              <View style={bub.callCardDivider} />
+              <AiSummaryCard summary={log.ai_summary} inline />
+            </>
+          )}
         </View>
-        {isGenerating && <AiSummaryGenerating />}
-        {!!log.ai_summary && <AiSummaryCard summary={log.ai_summary} />}
       </View>
     );
   }
@@ -200,7 +212,7 @@ function Bubble({
 // in the background (a few seconds). Turns into <AiSummaryCard> live via the
 // communications_log realtime UPDATE subscription once ai_summary lands.
 
-function AiSummaryGenerating() {
+function AiSummaryGenerating({ inline }: { inline?: boolean } = {}) {
   const pulse = useRef(new Animated.Value(0.4)).current;
   const dot1  = useRef(new Animated.Value(0)).current;
   const dot2  = useRef(new Animated.Value(0)).current;
@@ -229,7 +241,7 @@ function AiSummaryGenerating() {
   }, [pulse, dot1, dot2, dot3]);
 
   return (
-    <View style={ai.genCard}>
+    <View style={[ai.genCard, inline && ai.genCardInline]}>
       <Animated.View style={{ opacity: pulse }}>
         <Sparkles size={14} color="#8b5cf6" />
       </Animated.View>
@@ -248,7 +260,7 @@ function AiSummaryGenerating() {
 
 // ── AI call summary — revealed state ────────────────────────────────────────
 
-function AiSummaryCard({ summary }: { summary: string }) {
+function AiSummaryCard({ summary, inline }: { summary: string; inline?: boolean }) {
   const reveal = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
@@ -259,6 +271,7 @@ function AiSummaryCard({ summary }: { summary: string }) {
     <Animated.View
       style={[
         ai.card,
+        inline && ai.cardInline,
         {
           opacity: reveal,
           transform: [
@@ -286,12 +299,20 @@ const ai = StyleSheet.create({
     backgroundColor: '#8b5cf60d', borderWidth: 1, borderColor: '#8b5cf62a', borderStyle: 'dashed',
     borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8,
   },
+  genCardInline: {
+    borderWidth: 0, borderRadius: 0, backgroundColor: '#8b5cf608',
+    paddingHorizontal: 12, paddingVertical: 9,
+  },
   genText: { fontSize: 11.5, color: '#7c3aed', fontWeight: '600' },
   genDot:  { width: 4, height: 4, borderRadius: 2, backgroundColor: '#8b5cf6' },
   card: {
     backgroundColor: '#faf5ff', borderRadius: 14, padding: 12, paddingRight: 16,
     borderWidth: 1, borderColor: '#e9d5ff', overflow: 'hidden',
     shadowColor: '#8b5cf6', shadowOpacity: 0.12, shadowRadius: 10, shadowOffset: { width: 0, height: 4 },
+  },
+  cardInline: {
+    borderWidth: 0, borderRadius: 0, shadowOpacity: 0, backgroundColor: '#8b5cf608',
+    padding: 12,
   },
   watermark:  { position: 'absolute', top: -14, right: -14, opacity: 0.08, transform: [{ rotate: '15deg' }] },
   cardHead:   { flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 5 },
@@ -324,9 +345,9 @@ const bub = StyleSheet.create({
   copiedLabel:      { fontSize: 10, color: 'rgba(255,255,255,0.75)', marginTop: 2 },
   senderName:       { fontSize: 10.5, color: '#94a3b8', marginTop: 2, paddingHorizontal: 4 },
   // Call rows
-  callRow:          { flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 8, paddingHorizontal: 16 },
-  callOut:          { justifyContent: 'flex-end' },
-  callIn:           { justifyContent: 'flex-start' },
+  callCard:         { backgroundColor: '#fff', borderRadius: 14, borderWidth: 1, borderColor: '#e2e8f0', overflow: 'hidden' },
+  callCardHead:     { flexDirection: 'row', alignItems: 'center', gap: 10, padding: 12 },
+  callCardDivider:  { height: StyleSheet.hairlineWidth, backgroundColor: '#e2e8f0' },
   callIcon:         { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   callLabel:        { fontSize: 13, fontWeight: '500' },
   callTime:         { fontSize: 11, color: '#94a3b8', marginTop: 1 },

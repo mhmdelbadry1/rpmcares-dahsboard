@@ -1,7 +1,7 @@
 import type { Request, Response } from "express";
 import { supabaseAdmin } from "../lib/supabase";
 import { findPatientById } from "../models/patient";
-import { recordReviewTime } from "../services/review-time";
+import { recordReviewTime, updateReviewTimeSummary } from "../services/review-time";
 import { transcribeAndSummarizeCall, geminiConfigured } from "../services/gemini";
 import {
   generateVoiceToken, generateInboundToken,
@@ -83,6 +83,7 @@ export async function createCommunication(req: Request, res: Response): Promise<
       staffId:            profile.id,
       source:             "call",
       callDirection:      "outbound",
+      commLogId:          data.id,
     }).catch((e) => console.warn("[create-communication] review-time record failed:", e));
   }
 
@@ -218,6 +219,7 @@ export async function dialStatusCallback(req: Request, res: Response): Promise<v
             staffId:            existingRows.staff_id,
             source:             "call",
             callDirection:      "inbound",
+            commLogId:          existingRows.id,
           }).catch((e) => console.warn("[dial-status] review-time record failed:", e));
         }
       }
@@ -493,6 +495,7 @@ export async function recordingStatusCallback(req: Request, res: Response): Prom
             ai_generated_at: new Date().toISOString(),
             status:          "draft",
           });
+          await updateReviewTimeSummary(row.id, result.summary);
           console.log("[recording-status] transcript + AI summary saved for call %s", callSid);
         })
         .catch((e) => console.warn("[recording-status] transcription failed:", e));

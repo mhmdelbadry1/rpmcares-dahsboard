@@ -1345,40 +1345,47 @@ function ReviewTimeTab({
           {entries.map((entry) => (
             <View
               key={entry.id}
-              style={[rv.row, { backgroundColor: colors.card, borderColor: colors.border }]}
+              style={[rv.rowWrap, { backgroundColor: colors.card, borderColor: colors.border }]}
             >
-              <View style={rv.colDate}>
-                <Text style={[rv.cellDate, { color: colors.text }]}>
-                  {fmtReviewDate(entry.clock_start)}
-                </Text>
-                <SourceBadge source={entry.source ?? 'smartmeter_sync'} callDirection={entry.call_direction} />
-                {entry.patient_interaction && (
-                  <View style={rv.interactionBadge}>
-                    <Text style={rv.interactionText}>Patient Contact</Text>
-                  </View>
+              <View style={rv.row}>
+                <View style={rv.colDate}>
+                  <Text style={[rv.cellDate, { color: colors.text }]}>
+                    {fmtReviewDate(entry.clock_start)}
+                  </Text>
+                  <SourceBadge source={entry.source ?? 'smartmeter_sync'} callDirection={entry.call_direction} />
+                  {entry.patient_interaction && (
+                    <View style={rv.interactionBadge}>
+                      <Text style={rv.interactionText}>Patient Contact</Text>
+                    </View>
+                  )}
+                </View>
+                <View style={rv.colDuration}>
+                  <Text style={[rv.cellDuration, { color: colors.primary }]}>
+                    {fmtDuration(entry.duration_seconds ?? 0)}
+                  </Text>
+                </View>
+                <View style={rv.colBy}>
+                  <Text style={[rv.cellBy, { color: colors.text }]} numberOfLines={2}>
+                    {entry.logged_by ?? '—'}
+                  </Text>
+                </View>
+                {canDelete && (
+                  <Pressable
+                    onPress={() => handleDelete(entry.id)}
+                    disabled={deletingId === entry.id}
+                    style={rv.colAction}
+                  >
+                    {deletingId === entry.id
+                      ? <ActivityIndicator size="small" color="#DC2626" />
+                      : <X size={14} color="#DC2626" />
+                    }
+                  </Pressable>
                 )}
               </View>
-              <View style={rv.colDuration}>
-                <Text style={[rv.cellDuration, { color: colors.primary }]}>
-                  {fmtDuration(entry.duration_seconds ?? 0)}
+              {!!entry.note && (
+                <Text style={[rv.noteText, { color: colors.textSecondary, borderTopColor: colors.border }]}>
+                  {entry.note}
                 </Text>
-              </View>
-              <View style={rv.colBy}>
-                <Text style={[rv.cellBy, { color: colors.text }]} numberOfLines={2}>
-                  {entry.logged_by ?? '—'}
-                </Text>
-              </View>
-              {canDelete && (
-                <Pressable
-                  onPress={() => handleDelete(entry.id)}
-                  disabled={deletingId === entry.id}
-                  style={rv.colAction}
-                >
-                  {deletingId === entry.id
-                    ? <ActivityIndicator size="small" color="#DC2626" />
-                    : <X size={14} color="#DC2626" />
-                  }
-                </Pressable>
               )}
             </View>
           ))}
@@ -1405,7 +1412,9 @@ const rv = StyleSheet.create({
   divider:        { width: StyleSheet.hairlineWidth, alignSelf: 'stretch' },
   headerRow:      { flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 7, borderWidth: StyleSheet.hairlineWidth, borderRadius: 8 },
   headerCell:     { fontSize: 10, fontWeight: '700', letterSpacing: 0.4 },
-  row:            { flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10, borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, alignItems: 'flex-start' },
+  rowWrap:        { borderWidth: StyleSheet.hairlineWidth, borderRadius: 10, overflow: 'hidden' },
+  row:            { flexDirection: 'row', paddingHorizontal: 12, paddingVertical: 10, alignItems: 'flex-start' },
+  noteText:       { fontSize: 12, lineHeight: 17, paddingHorizontal: 12, paddingBottom: 10, paddingTop: 8, borderTopWidth: StyleSheet.hairlineWidth },
   colDate:        { flex: 2.2, gap: 3 },
   colDuration:    { flex: 1.2, alignItems: 'center', textAlign: 'center' },
   colBy:          { flex: 1.6 },
