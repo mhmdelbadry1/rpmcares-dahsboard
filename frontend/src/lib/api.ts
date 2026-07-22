@@ -500,7 +500,6 @@ export type BillingCycleReport = {
   created_at: string;
   records: BillingRecord[];
   totalProjected: number;
-  totalActual: number;
   status: string;
 };
 

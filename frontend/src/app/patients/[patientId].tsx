@@ -1666,13 +1666,11 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
               <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">CYCLE START</th>
               <th style="text-align:left;background:#444;color:#fff;padding:4px 8px;font-size:10px">CPT CODES</th>
               <th style="text-align:right;background:#444;color:#fff;padding:4px 8px;font-size:10px">PROJECTED</th>
-              <th style="text-align:right;background:#444;color:#fff;padding:4px 8px;font-size:10px">ACTUAL</th>
             </tr></thead>
             <tbody>${r.billingCycles.map((cy, i) => `<tr style="background:${i % 2 === 0 ? '#fff' : '#f9f9f9'}">
               <td style="padding:5px 8px;border-bottom:1px solid #eee">${esc(cy.cycle_start)}</td>
               <td style="padding:5px 8px;border-bottom:1px solid #eee">${esc(cy.records.map((rec: any) => rec.cpt_code).join(', ') || '—')}</td>
               <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">$${cy.totalProjected.toFixed(2)}</td>
-              <td style="padding:5px 8px;border-bottom:1px solid #eee;text-align:right">$${cy.totalActual.toFixed(2)}</td>
             </tr>`).join('')}</tbody>
           </table>
         </div>` : '';
@@ -1933,10 +1931,7 @@ function ReportTab({ patient, token, colors }: { patient: Patient; token: string
                     <Text style={{ color: colors.textSecondary, fontSize: 11 }}>
                       CPT: {cy.records.map((r: any) => r.cpt_code).join(', ') || '—'}
                     </Text>
-                    <View style={{ flexDirection: 'row', gap: 16 }}>
-                      <Text style={{ color: colors.textSecondary, fontSize: 11 }}>Projected: ${cy.totalProjected.toFixed(2)}</Text>
-                      <Text style={{ color: colors.textSecondary, fontSize: 11 }}>Actual: ${cy.totalActual.toFixed(2)}</Text>
-                    </View>
+                    <Text style={{ color: colors.textSecondary, fontSize: 11 }}>Projected: ${cy.totalProjected.toFixed(2)}</Text>
                   </View>
                 );
               })}
