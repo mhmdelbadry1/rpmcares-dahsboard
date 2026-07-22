@@ -222,7 +222,7 @@ export default function CommunicationsScreen() {
   const { session } = useAuth();
   const token       = session?.token ?? null;
   const params      = useLocalSearchParams<{ patientId?: string; action?: string }>();
-  const { counts: unreadCounts, markRead, refresh: refreshUnread } = useUnread();
+  const { counts: unreadCounts, markRead, markAllRead, refresh: refreshUnread } = useUnread();
 
   // ── Patient sidebar state ─────────────────────────────────────────────────
   const [patients, setPatients]       = useState<Patient[]>([]);
@@ -715,21 +715,19 @@ export default function CommunicationsScreen() {
   const markAllReadFn = useCallback(async () => {
     if (!token || markingAllRead) return;
     const source = allLoaded ? allPatients : patients;
-    const unread = source.filter(p => (unreadCounts[p.id]?.unread ?? 0) > 0);
-    if (!unread.length) return;
+    const unreadIds = source.filter(p => (unreadCounts[p.id]?.unread ?? 0) > 0).map(p => p.id);
+    if (!unreadIds.length) return;
     setMarkingAllRead(true);
-    const results = await Promise.allSettled(unread.map(p => api.markCommRead(token, p.id)));
-    await refreshUnread();
+    const { failedCount } = await markAllRead(unreadIds);
     setMarkingAllRead(false);
-    const failed = results.filter(r => r.status === 'rejected').length;
-    if (failed > 0) {
+    if (failedCount > 0) {
       showError(
-        failed === unread.length
+        failedCount === unreadIds.length
           ? 'Could not mark messages as read. Check your connection and try again.'
-          : `${failed} of ${unread.length} conversations could not be marked as read.`
+          : `${failedCount} of ${unreadIds.length} conversations could not be marked as read.`
       );
     }
-  }, [allPatients, allLoaded, patients, unreadCounts, token, markingAllRead, refreshUnread, showError]);
+  }, [allPatients, allLoaded, patients, unreadCounts, token, markingAllRead, markAllRead, showError]);
 
   // ── Filtered + sorted patient list ────────────────────────────────────────
   const displayedPatients = useMemo(() => {
@@ -889,7 +887,7 @@ export default function CommunicationsScreen() {
           {(['recent', 'name', 'unread'] as const).map(m => (
             <Pressable key={m} style={[s.sortBtn, sortMode === m && s.sortBtnActive]} onPress={() => setSortMode(m)}>
               <Text style={[s.sortBtnText, sortMode === m && s.sortBtnTextActive]}>
-                {m === 'recent' ? 'Recent' : m === 'name' ? 'Name' : 'Unread'}
+                {m === 'recent' ? 'Recent' : m === 'name' ? 'Name' : 'Most unread'}
               </Text>
             </Pressable>
           ))}

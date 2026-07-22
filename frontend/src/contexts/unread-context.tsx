@@ -8,6 +8,7 @@ type UnreadContextValue = {
   total: number;
   refresh: () => Promise<void>;
   markRead: (patientId: string) => Promise<void>;
+  markAllRead: (patientIds: string[]) => Promise<{ failedCount: number }>;
 };
 
 const UnreadContext = createContext<UnreadContextValue>({
@@ -15,6 +16,7 @@ const UnreadContext = createContext<UnreadContextValue>({
   total: 0,
   refresh: async () => {},
   markRead: async () => {},
+  markAllRead: async () => ({ failedCount: 0 }),
 });
 
 export function UnreadProvider({ children }: { children: React.ReactNode }) {
@@ -54,6 +56,37 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
     }
   }, [token, counts]);
 
+  const markAllRead = useCallback(async (patientIds: string[]) => {
+    if (!token || !patientIds.length) return { failedCount: 0 };
+    const previous = counts;
+    // Optimistically clear every badge at once so the list updates immediately
+    // instead of waiting for every request to round-trip before anything changes.
+    setCounts(prev => {
+      const next = { ...prev };
+      for (const id of patientIds) {
+        if (next[id]) next[id] = { ...next[id], unread: 0 };
+      }
+      return next;
+    });
+    const results = await Promise.allSettled(patientIds.map(id => api.markCommRead(token, id)));
+    const failedIds = patientIds.filter((_, i) => results[i].status === 'rejected');
+    if (failedIds.length) {
+      // Roll back only the ones that actually failed; leave successful clears in place.
+      setCounts(prev => {
+        const next = { ...prev };
+        for (const id of failedIds) {
+          if (previous[id]) next[id] = previous[id];
+        }
+        return next;
+      });
+    }
+    try {
+      const { counts: data } = await api.getUnreadCounts(token);
+      setCounts(data);
+    } catch { /* keep optimistic state; next poll will reconcile */ }
+    return { failedCount: failedIds.length };
+  }, [token, counts]);
+
   // Load on mount and whenever token changes
   useEffect(() => {
     if (!token) { setCounts({}); return; }
@@ -74,7 +107,7 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   const total = Object.values(counts).reduce((s, v) => s + (v.unread ?? 0), 0);
 
   return (
-    <UnreadContext.Provider value={{ counts, total, refresh, markRead }}>
+    <UnreadContext.Provider value={{ counts, total, refresh, markRead, markAllRead }}>
       {children}
     </UnreadContext.Provider>
   );
