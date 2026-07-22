@@ -108,7 +108,7 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
     }
   }
 
-  const [patientRes, notesRes, reviewTimesRes, billingRes, billingCyclesRes, cycleStatsRes, carePlanRes] =
+  const [patientRes, notesRes, reviewTimesRes, billingRes, allBillingRes, billingCyclesRes, cycleStatsRes, carePlanRes] =
     await Promise.all([
       supabaseAdmin
         .from("patients")
@@ -129,11 +129,18 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
         .eq("patient_id", patientId)
         .gte("clock_start", rangeStart)
         .lte("clock_start", `${rangeEnd}T23:59:59`),
+      // Records for the selected cycle — used in report body & categories
       supabaseAdmin
         .from("billing_records")
         .select("*")
         .eq("patient_id", patientId)
         .eq("cycle_start", exactCycleStart ?? period.start),
+      // All records across every cycle — used to populate billing cycle history
+      supabaseAdmin
+        .from("billing_records")
+        .select("*")
+        .eq("patient_id", patientId)
+        .order("cycle_start", { ascending: false }),
       // Last 6 billing cycles for the cycle history section
       supabaseAdmin
         .from("billing_cycles")
@@ -170,7 +177,8 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
   const clinic       = Array.isArray(patient.clinics) ? patient.clinics[0] : patient.clinics;
   const notes        = (notesRes.data ?? []) as any[];
   const reviews      = (reviewTimesRes.data ?? []) as any[];
-  const records      = (billingRes.data ?? []) as any[];
+  const records      = (billingRes.data    ?? []) as any[];
+  const allRecords   = (allBillingRes.data ?? []) as any[];
   const billingCycles = (billingCyclesRes.data ?? []) as any[];
   const cycleStats   = cycleStatsRes.data as any ?? null;
   const carePlanRow  = ((carePlanRes.data ?? []) as any[])[0] ?? null;
@@ -238,7 +246,7 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
     carePlan,
     billingRecords: records,
     billingCycles:  billingCycles.map((c) => {
-      const cycleRecords = records.filter((r: any) => r.cycle_start === c.cycle_start);
+      const cycleRecords = allRecords.filter((r: any) => r.cycle_start === c.cycle_start);
       return {
         id:            c.id,
         cycle_start:   c.cycle_start,
@@ -247,7 +255,6 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
         created_at:    c.created_at,
         records:       cycleRecords,
         totalProjected: cycleRecords.reduce((s: number, r: any) => s + parseFloat(r.projected_amount ?? "0"), 0),
-        totalActual:    cycleRecords.reduce((s: number, r: any) => s + parseFloat(r.actual_amount    ?? "0"), 0),
         status: cycleRecords.length > 0
           ? cycleRecords.every((r: any) => r.status === "paid")      ? "paid"
           : cycleRecords.every((r: any) => r.status === "submitted") ? "submitted"

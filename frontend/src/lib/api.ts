@@ -505,7 +505,6 @@ export type BillingCycleReport = {
   created_at: string;
   records: BillingRecord[];
   totalProjected: number;
-  totalActual: number;
   status: string;
 };
 
@@ -657,7 +656,7 @@ export const api = {
   },
   inviteMember: (
     token: string,
-    payload: { email: string; name: string; role: 'clinic_admin' | 'staff'; clinicId: string },
+    payload: { email: string; name: string; role: 'clinic_admin' | 'staff' | 'super_admin'; clinicId: string | null },
   ) =>
     request<{ ok: true; emailSent: boolean; emailError?: string; inviteLink: string | null; email: string }>(
       '/api/admin/members/invite',

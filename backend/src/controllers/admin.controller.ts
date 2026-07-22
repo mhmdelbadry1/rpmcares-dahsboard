@@ -18,8 +18,8 @@ function extractMsg(err: unknown, fallback = "An unexpected error occurred."): s
 const inviteSchema = z.object({
   email: z.string().email(),
   name: z.string().min(1),
-  role: z.enum(["clinic_admin", "staff"]),
-  clinicId: z.string().uuid(),
+  role: z.enum(["clinic_admin", "staff", "super_admin"]),
+  clinicId: z.string().uuid().nullish(),
 });
 
 export async function inviteMember(req: Request, res: Response) {
@@ -41,8 +41,14 @@ export async function inviteMember(req: Request, res: Response) {
     return res.status(403).json({ error: "Not authorized." });
   }
 
-  const clinic = await findClinicById(clinicId);
-  if (!clinic) return res.status(400).json({ error: "Unknown clinic." });
+  // Resolve clinic — required for clinic_admin/staff roles, not allowed for super_admin
+  let resolvedClinicId: string | null = null;
+  if (role !== "super_admin") {
+    if (!clinicId) return res.status(400).json({ error: "clinicId is required for clinic_admin and staff roles." });
+    const clinic = await findClinicById(clinicId);
+    if (!clinic) return res.status(400).json({ error: "Unknown clinic." });
+    resolvedClinicId = clinicId;
+  }
 
   const redirectTo = `${env.APP_BASE_URL}/accept-invite`;
 
@@ -54,7 +60,7 @@ export async function inviteMember(req: Request, res: Response) {
     const { data, error } = await supabaseAdmin.auth.admin.generateLink({
       type: "invite",
       email,
-      options: { redirectTo, data: { role, name, clinic_id: clinicId } },
+      options: { redirectTo, data: { role, name, clinic_id: resolvedClinicId } },
     });
     if (error || !data?.user?.id || !data?.properties?.action_link) {
       console.error("[invite] generateLink error:", error);
@@ -107,7 +113,7 @@ export async function inviteMember(req: Request, res: Response) {
   // ── Step 3: Upsert the profile row ────────────────────────────────────────
   try {
     const { error: upsertErr } = await supabaseAdmin.from("profiles").upsert(
-      { id: userId, email, role, name, clinic_id: clinicId, invited_by: caller.id },
+      { id: userId, email, role, name, clinic_id: resolvedClinicId, invited_by: caller.id },
       { onConflict: "id" },
     );
     if (upsertErr) console.error("[invite] Profile upsert error:", upsertErr);
@@ -133,7 +139,7 @@ export async function listMembers(req: Request, res: Response) {
         .maybeSingle();
       clinicId = data?.id;
     }
-    profiles = await listProfiles({ roles: ["clinic_admin", "staff"], clinicId });
+    profiles = await listProfiles({ roles: ["super_admin", "clinic_admin", "staff"], clinicId });
   } else if (caller.role === "clinic_admin") {
     profiles = await listProfiles({
       roles: ["clinic_admin", "staff"],

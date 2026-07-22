@@ -191,7 +191,7 @@ export default function StaffScreen() {
                     {member.email}
                   </Text>
                   <View style={styles.memberMetaRow}>
-                    <StatusPill tone={member.role === 'clinic_admin' ? 'info' : 'muted'}>
+                    <StatusPill tone={member.role === 'super_admin' ? 'primary' : member.role === 'clinic_admin' ? 'info' : 'muted'}>
                       {ROLE_META[member.role].label}
                     </StatusPill>
                     {isSuperAdmin && (
@@ -313,7 +313,7 @@ function ActionMenu({
 
   const items: { icon: any; label: string; color?: string; onPress: () => void }[] = [];
 
-  if (isSuperAdmin) {
+  if (isSuperAdmin && member.role !== 'super_admin') {
     items.push({ icon: Pencil,  label: 'Edit profile',   onPress: () => { onClose(); onEdit(); } });
     items.push({
       icon: suspended ? ShieldCheck : ShieldOff,
@@ -713,7 +713,7 @@ function InviteModal({
   const { session } = useAuth();
   const [name,     setName]     = useState('');
   const [email,    setEmail]    = useState('');
-  const [role,     setRole]     = useState<'clinic_admin' | 'staff'>('staff');
+  const [role,     setRole]     = useState<'clinic_admin' | 'staff' | 'super_admin'>('staff');
   const [clinicId, setClinicId] = useState<string | null>(isSuperAdmin ? null : callerClinicId);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState('');
@@ -728,14 +728,23 @@ function InviteModal({
 
   const handleSubmit = async () => {
     if (!session) return;
-    if (!name.trim() || !email.trim() || !clinicId) {
+    if (!name.trim() || !email.trim()) {
+      setError('Name and email are required.');
+      return;
+    }
+    if (role !== 'super_admin' && !clinicId) {
       setError('Name, email and clinic are all required.');
       return;
     }
     setSubmitting(true);
     setError('');
     try {
-      const res = await api.inviteMember(session.token, { name: name.trim(), email: email.trim(), role, clinicId });
+      const res = await api.inviteMember(session.token, {
+        name: name.trim(),
+        email: email.trim(),
+        role,
+        clinicId: role === 'super_admin' ? null : clinicId,
+      });
       onInvited({ inviteLink: res.inviteLink, email: res.email, emailSent: res.emailSent, emailError: res.emailError });
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Could not send the invite.');
@@ -776,9 +785,10 @@ function InviteModal({
             <>
               <Text style={[styles.fieldLabel, { color: colors.text }]}>Role</Text>
               <View style={styles.segmentRow}>
-                {(['staff', 'clinic_admin'] as const).map((r) => (
+                {(['staff', 'clinic_admin', 'super_admin'] as const).map((r) => (
                   <Pressable
-                    key={r} onPress={() => setRole(r)}
+                    key={r}
+                    onPress={() => { setRole(r); if (r === 'super_admin') setClinicId(null); }}
                     style={[
                       styles.segment,
                       { borderColor: colors.border, backgroundColor: role === r ? colors.primary : colors.card },
@@ -793,7 +803,7 @@ function InviteModal({
             </>
           )}
 
-          {isSuperAdmin ? (
+          {isSuperAdmin && role !== 'super_admin' ? (
             <>
               <Text style={[styles.fieldLabel, { color: colors.text }]}>Clinic</Text>
               <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ gap: 8 }}>
@@ -815,11 +825,11 @@ function InviteModal({
                 )}
               </ScrollView>
             </>
-          ) : (
+          ) : !isSuperAdmin ? (
             <Text style={[styles.fieldLabel, { color: colors.textSecondary, marginTop: 16 }]}>
               Role: Staff · Clinic: {clinics.find((c) => c.id === callerClinicId)?.name ?? 'your clinic'}
             </Text>
-          )}
+          ) : null}
 
           {error ? <Text style={[styles.error, { color: colors.destructive, marginTop: 12 }]}>{error}</Text> : null}
 

@@ -97,7 +97,7 @@ export function renderAcceptInvitePage(): string {
       </div>
     </div>
 
-    <p class="hint">Once your account is ready, open the RPMCares app and sign in with your email.</p>
+    <p class="hint">After setting your password, you'll be taken to the dashboard automatically.</p>
   </div>
 
   <script>
@@ -179,6 +179,24 @@ export function renderAcceptInvitePage(): string {
         btn.textContent = 'Set password & continue';
         return;
       }
+
+      // Auto-login: exchange credentials for a backend session token so the
+      // dashboard can pick it up from localStorage and skip the login screen.
+      btn.textContent = 'Logging you in…';
+      try {
+        const { data: { user } } = await supabaseClient.auth.getUser();
+        const loginRes = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email: user.email, password }),
+        });
+        if (loginRes.ok) {
+          const session = await loginRes.json();
+          localStorage.setItem('rpmcares.session', JSON.stringify(session));
+          window.location.replace('/');
+          return;
+        }
+      } catch (_) { /* fall through */ }
 
       showStatus('You\\'re all set', 'Your password has been saved. Open the RPMCares app and sign in with your email.', 'success');
     });

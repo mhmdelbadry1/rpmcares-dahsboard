@@ -36,14 +36,19 @@ export async function fetchReviewMinutesMap(
   const map = new Map<string, Array<{ date: string; secs: number }>>();
   if (patientIds.length === 0) return map;
 
+  // Tenovi sync stores review time on the 1st of each month regardless of the
+  // patient's actual cycle start. Expand rangeMin back to the 1st of its month
+  // so those entries are always captured by the DB query.
+  const expandedMin = rangeMin.slice(0, 7) + "-01";
+
   const BATCH = 100; // smaller batch so each paginated query stays fast
 
   for (let i = 0; i < patientIds.length; i += BATCH) {
     const batch = patientIds.slice(i, i + BATCH);
 
     const [tlRows, rtRows] = await Promise.all([
-      fetchAllRows("time_logs",            batch, "logged_at",   rangeMin, rangeMax),
-      fetchAllRows("patient_review_times", batch, "clock_start", rangeMin, rangeMax),
+      fetchAllRows("time_logs",            batch, "logged_at",   expandedMin, rangeMax),
+      fetchAllRows("patient_review_times", batch, "clock_start", expandedMin, rangeMax),
     ]);
 
     for (const row of tlRows) {
@@ -67,9 +72,13 @@ export function minutesFromMap(
   cycleStart: string,
   cycleEnd: string,
 ): number {
+  // Use the 1st of the cycle's start month as the lower bound so that
+  // Tenovi sync entries (always stored as YYYY-MM-01) are included for
+  // any cycle that falls within that calendar month.
+  const monthStart = cycleStart.slice(0, 7) + "-01";
   const entries = map.get(patientId) ?? [];
   const totalSecs = entries
-    .filter(e => e.date >= cycleStart && e.date <= cycleEnd)
+    .filter(e => e.date >= monthStart && e.date <= cycleEnd)
     .reduce((s, e) => s + e.secs, 0);
   return Math.floor(totalSecs / 60);
 }

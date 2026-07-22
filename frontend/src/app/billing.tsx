@@ -24,6 +24,7 @@ import {
   type MonthlyBillingReport, type ClinicReport, type Clinic,
 } from '@/lib/api';
 import { openReportForDownload } from '@/lib/pdf-utils';
+import { exportQueueXlsx, exportClinicXlsx } from '@/lib/excel-utils';
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -123,7 +124,6 @@ function QueueTab({ session, colors, isSuperAdmin }: {
   const [program, setProgram]     = useState('');
   const [search, setSearch]       = useState('');
   const [evaluating, setEvaluating] = useState(false);
-  const [exporting, setExporting]   = useState(false);
 
   const load = useCallback(async () => {
     if (!session) return;
@@ -150,119 +150,11 @@ function QueueTab({ session, colors, isSuperAdmin }: {
     } catch { } finally { setEvaluating(false); }
   }
 
-  const buildQueueHtml = (rows: BillingRecord[], mon: string): string => {
-    const esc = (s: string) => (s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const monthLabel = new Date(mon + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
-    const generatedStr = new Date().toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const totalProjected = rows.reduce((s, r) => s + (r.projected_amount ?? 0), 0);
-
-    // Group by clinic
-    const clinicMap = new Map<string, BillingRecord[]>();
-    for (const r of rows) {
-      const key = r.clinic_name ?? 'Unknown';
-      if (!clinicMap.has(key)) clinicMap.set(key, []);
-      clinicMap.get(key)!.push(r);
-    }
-
-    const clinicSections = [...clinicMap.entries()].map(([clinicName, clinicRows]) => {
-      const sub = clinicRows.reduce((s, r) => s + (r.projected_amount ?? 0), 0);
-      const patRows = clinicRows.map((r, i) => `
-        <tr class="${i % 2 === 1 ? 'alt' : ''}">
-          <td>${esc(r.patient_name ?? '—')}<br><span class="sub">ID: ${esc(r.patient_id?.slice(0, 8) ?? '—')}</span></td>
-          <td>${esc(r.program ?? '—')}</td>
-          <td>${esc(r.insurance_type?.replace('Medicare Advantage', 'MA') ?? '—')}</td>
-          <td class="c">${esc(r.cpt_code)}</td>
-          <td class="c">${r.reading_count ?? '—'}</td>
-          <td class="c">${r.total_minutes ?? '—'}</td>
-          <td>${esc(r.cycle_start ?? '—')}${r.cycle_end ? `<br><span class="sub">${esc(r.cycle_end)}</span>` : ''}</td>
-          <td class="r">${r.projected_amount != null ? `$${r.projected_amount.toFixed(2)}` : '—'}</td>
-        </tr>`).join('');
-      return `
-        <div class="clinic-block">
-          <div class="clinic-heading">${esc(clinicName)}<span class="clinic-meta">${clinicRows.length} records &nbsp;&bull;&nbsp; $${sub.toFixed(2)} projected</span></div>
-          <table class="data">
-            <thead><tr>
-              <th>Patient</th><th>Program</th><th>Insurance</th>
-              <th class="c">CPT</th><th class="c">Readings</th><th class="c">Min</th>
-              <th>Cycle Date</th><th class="r">Projected</th>
-            </tr></thead>
-            <tbody>${patRows}</tbody>
-            <tfoot><tr>
-              <td colspan="7" class="subtotal-label">Clinic Subtotal</td>
-              <td class="r subtotal-val">$${sub.toFixed(2)}</td>
-            </tr></tfoot>
-          </table>
-        </div>`;
-    }).join('');
-
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; background: #fff; padding: 28px 32px; }
-  @media print { @page { size: A4 landscape; margin: 1.5cm 1.8cm; } body { padding: 0; } }
-  .doc-header { border-top: 3px solid #000; border-bottom: 1px solid #000; padding: 10px 0; margin-bottom: 18px; }
-  .doc-title { font-size: 14pt; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; }
-  .doc-meta { font-size: 8.5pt; margin-top: 3px; color: #444; }
-  .summary-box { border: 1px solid #000; padding: 8px 12px; margin-bottom: 18px; }
-  .summary-box table { width: 100%; border-collapse: collapse; }
-  .summary-box td { padding: 3px 8px; font-size: 9.5pt; border-right: 1px solid #bbb; text-align: center; width: 33%; }
-  .summary-box td:last-child { border-right: none; }
-  .summary-box .val { font-size: 13pt; font-weight: bold; display: block; }
-  .summary-box .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; color: #333; }
-  .section-title { font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 14px 0 6px; }
-  table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
-  table.data th { background: #000; color: #fff; padding: 4px 6px; text-align: left; font-weight: bold; font-size: 8pt; }
-  table.data th.c, table.data td.c { text-align: center; }
-  table.data th.r, table.data td.r { text-align: right; }
-  table.data td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
-  table.data tr.alt td { background: #f7f7f7; }
-  table.data tfoot td { border-top: 1px solid #000; border-bottom: none; }
-  .subtotal-label { font-weight: bold; }
-  .subtotal-val { font-weight: bold; }
-  .sub { font-size: 7.5pt; color: #555; }
-  .clinic-block { margin-bottom: 20px; page-break-inside: avoid; }
-  .clinic-heading { font-size: 10.5pt; font-weight: bold; margin-bottom: 4px; border-left: 3px solid #000; padding-left: 7px; }
-  .clinic-meta { font-size: 8pt; font-weight: normal; color: #555; margin-left: 10px; }
-  .grand-total { border-top: 2px solid #000; padding-top: 8px; font-size: 11pt; font-weight: bold; text-align: right; margin-top: 12px; }
-  .doc-footer { margin-top: 16px; border-top: 1px solid #000; padding-top: 6px; font-size: 7.5pt; color: #555; text-align: center; }
-</style>
-</head><body>
-<div class="doc-header">
-  <div class="doc-title">RPMCares &mdash; ${esc(monthLabel)} Billing Report</div>
-  <div class="doc-meta">Billing Period: <b>${esc(monthLabel)}</b> &nbsp;&nbsp; Generated: ${generatedStr}</div>
-</div>
-<div class="summary-box">
-  <table><tr>
-    <td><span class="val">${rows.length}</span><span class="lbl">Total Records</span></td>
-    <td><span class="val">${clinicMap.size}</span><span class="lbl">Clinics</span></td>
-    <td><span class="val">$${totalProjected.toFixed(2)}</span><span class="lbl">Projected Revenue</span></td>
-  </tr></table>
-</div>
-<div class="section-title">Billing Detail by Clinic</div>
-${clinicSections}
-<div class="grand-total">Grand Total Projected: $${totalProjected.toFixed(2)}</div>
-<div class="doc-footer">CONFIDENTIAL &mdash; For authorized billing review only. Not a clinical or legal record. &nbsp;|&nbsp; RPMCares &copy; ${new Date().getFullYear()}</div>
-</body></html>`;
-  };
-
-  const exportQueuePdf = async () => {
+  const exportQueueXlsxHandler = () => {
     if (records.length === 0) return;
-    setExporting(true);
     try {
-      const html = buildQueueHtml(records, month);
-      if (Platform.OS === 'web') {
-        openReportForDownload(html);
-      } else {
-        const Print   = await import('expo-print');
-        const Sharing = await import('expo-sharing');
-        const { uri } = await Print.printToFileAsync({ html, base64: false });
-        if (await Sharing.isAvailableAsync()) {
-          const label = new Date(month + '-01').toLocaleString('en-US', { month: 'long', year: 'numeric' });
-          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${label} Billing Report`, UTI: 'com.adobe.pdf' });
-        }
-      }
-    } catch (e: any) { console.warn('[billing] queue PDF failed:', e.message); }
-    finally { setExporting(false); }
+      exportQueueXlsx(records, month);
+    } catch (e: any) { console.warn('[billing] queue Excel failed:', e.message); }
   };
 
   // Client-side search filter
@@ -355,12 +247,12 @@ ${clinicSections}
               </Pressable>
             )}
             <Pressable
-              onPress={exportQueuePdf}
-              disabled={exporting || records.length === 0}
-              style={[styles.actionBtn, { backgroundColor: colors.surface, borderColor: colors.primary, borderWidth: 1, opacity: (exporting || records.length === 0) ? 0.5 : 1 }]}>
+              onPress={exportQueueXlsxHandler}
+              disabled={records.length === 0}
+              style={[styles.actionBtn, { backgroundColor: colors.surface, borderColor: colors.primary, borderWidth: 1, opacity: records.length === 0 ? 0.5 : 1 }]}>
               <Download size={12} color={colors.primary} />
               <Text style={[styles.actionBtnText, { color: colors.primary }]}>
-                {exporting ? 'Exporting…' : `${new Date(month + '-01').toLocaleString('en-US', { month: 'long' })} Report`}
+                {`${new Date(month + '-01').toLocaleString('en-US', { month: 'long' })} Excel`}
               </Text>
             </Pressable>
           </View>
@@ -1378,7 +1270,6 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
   const [report, setReport]     = useState<ClinicReport | null>(null);
   const [loading, setLoading]   = useState(false);
   const [error, setError]       = useState('');
-  const [exporting, setExporting] = useState(false);
 
   // Load clinic list for super_admin selector
   useEffect(() => {
@@ -1409,121 +1300,11 @@ function ClinicSummaryTab({ session, colors, isSuperAdmin }: { session: any; col
     ? Math.round((report.totals.thresholdMet / Math.max(report.totals.patients, 1)) * 100)
     : 0;
 
-  const buildClinicHtml = (r: ClinicReport): string => {
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const generatedStr = new Date(r.generatedAt).toLocaleString('en-US', { year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-    const cptSummaryRows = Object.entries(r.totals.byCpt).map(([code, v]) =>
-      `<tr><td>${esc(code)}</td><td class="c">${v.count}</td><td class="r">$${v.amount.toFixed(2)}</td></tr>`
-    ).join('');
-    const patientRows = r.patients.map((p, i) => `
-      <tr class="${i % 2 === 1 ? 'alt' : ''}">
-        <td>${esc(p.full_name)}<br><span class="sub">MRN: ${esc(p.mrn ?? '—')} &nbsp; DOB: ${esc(p.dob ?? '—')}</span></td>
-        <td>${esc(p.program ?? '—')}</td>
-        <td>${esc(p.insurance_type ?? p.insurance_payer ?? '—')}</td>
-        <td class="c">${p.totalReadings}</td>
-        <td class="c">${p.totalMinutes}</td>
-        <td>${esc(p.cptCodes.join(', ') || '—')}</td>
-        <td>${esc(p.cycle_start ?? '—')}${p.cycle_end ? `<br><span class="sub">${esc(p.cycle_end)}</span>` : ''}</td>
-        <td class="r">$${p.totalProjected.toFixed(2)}</td>
-      </tr>`).join('');
-    return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
-<style>
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: Arial, Helvetica, sans-serif; font-size: 10pt; color: #000; background: #fff; padding: 28px 32px; }
-  @media print { @page { size: A4 landscape; margin: 1.5cm 1.8cm; } body { padding: 0; } }
-
-  /* Header */
-  .doc-header { border-top: 3px solid #000; border-bottom: 1px solid #000; padding: 10px 0; margin-bottom: 18px; }
-  .doc-title { font-size: 14pt; font-weight: bold; letter-spacing: 0.5px; text-transform: uppercase; }
-  .doc-sub { font-size: 9.5pt; margin-top: 3px; }
-  .doc-meta { font-size: 8.5pt; margin-top: 2px; color: #444; }
-
-  /* Summary box */
-  .summary-box { border: 1px solid #000; padding: 8px 12px; margin-bottom: 18px; display: table; width: 100%; }
-  .summary-box table { width: 100%; border-collapse: collapse; }
-  .summary-box td { padding: 3px 8px; font-size: 9.5pt; border-right: 1px solid #bbb; text-align: center; width: 20%; }
-  .summary-box td:last-child { border-right: none; }
-  .summary-box .val { font-size: 13pt; font-weight: bold; display: block; }
-  .summary-box .lbl { font-size: 7.5pt; text-transform: uppercase; letter-spacing: 0.3px; color: #333; }
-
-  /* Section headings */
-  .section-title { font-size: 9pt; font-weight: bold; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #000; padding-bottom: 2px; margin: 14px 0 6px; }
-
-  /* Tables */
-  table.data { width: 100%; border-collapse: collapse; font-size: 8.5pt; }
-  table.data th { background: #000; color: #fff; padding: 4px 6px; text-align: left; font-weight: bold; font-size: 8pt; }
-  table.data th.c, table.data td.c { text-align: center; }
-  table.data th.r, table.data td.r { text-align: right; }
-  table.data td { padding: 4px 6px; border-bottom: 1px solid #ddd; vertical-align: top; }
-  table.data tr.alt td { background: #f7f7f7; }
-  .sub { font-size: 7.5pt; color: #555; }
-
-  /* CPT summary */
-  table.cpt { width: auto; min-width: 260px; border-collapse: collapse; font-size: 8.5pt; }
-  table.cpt th { background: #000; color: #fff; padding: 4px 10px; text-align: left; }
-  table.cpt td { padding: 3px 10px; border-bottom: 1px solid #ddd; }
-
-  /* Footer */
-  .doc-footer { margin-top: 18px; border-top: 1px solid #000; padding-top: 6px; font-size: 7.5pt; color: #555; text-align: center; }
-</style>
-</head><body>
-
-<div class="doc-header">
-  <div class="doc-title">RPMCares &mdash; Clinic Billing Summary Report</div>
-  <div class="doc-sub">${esc(r.clinic.name)}${r.clinic.specialty ? ` &nbsp;&bull;&nbsp; ${esc(r.clinic.specialty)}` : ''}${r.clinic.location ? ` &nbsp;&bull;&nbsp; ${esc(r.clinic.location)}` : ''}</div>
-  <div class="doc-meta">Billing Period: <b>${esc(r.period.label)}</b> &nbsp;&nbsp; Generated: ${generatedStr}</div>
-</div>
-
-<div class="summary-box">
-  <table><tr>
-    <td><span class="val">${r.totals.patients}</span><span class="lbl">Total Patients</span></td>
-    <td><span class="val">${r.totals.totalReadings}</span><span class="lbl">Total Readings</span></td>
-    <td><span class="val">${r.totals.totalMinutes}</span><span class="lbl">Review Min</span></td>
-    <td><span class="val">${r.totals.thresholdMet}</span><span class="lbl">Threshold Met</span></td>
-    <td><span class="val">$${r.totals.totalProjected.toFixed(2)}</span><span class="lbl">Projected Revenue</span></td>
-  </tr></table>
-</div>
-
-${cptSummaryRows ? `<div class="section-title">CPT Code Summary</div>
-<table class="cpt"><thead><tr><th>CPT Code</th><th class="c">Patients</th><th class="r">Projected Amount</th></tr></thead>
-<tbody>${cptSummaryRows}</tbody></table>` : ''}
-
-<div class="section-title">Patient Billing Detail</div>
-<table class="data"><thead><tr>
-  <th>Patient Name &nbsp; MRN / DOB</th>
-  <th>Program</th>
-  <th>Insurance Type</th>
-  <th class="c">Readings</th>
-  <th class="c">Min</th>
-  <th>CPT Codes</th>
-  <th>Cycle Date</th>
-  <th class="r">Projected</th>
-</tr></thead><tbody>${patientRows}</tbody></table>
-
-<div class="doc-footer">
-  CONFIDENTIAL &mdash; For authorized billing review only. Not a clinical or legal record. &nbsp;|&nbsp; RPMCares &copy; ${new Date().getFullYear()}
-</div>
-
-</body></html>`;
-  };
-
-  const exportClinicPdf = async () => {
+  const exportClinicXlsxHandler = () => {
     if (!report) return;
-    setExporting(true);
     try {
-      const html = buildClinicHtml(report);
-      if (Platform.OS === 'web') {
-        openReportForDownload(html);
-      } else {
-        const Print   = await import('expo-print');
-        const Sharing = await import('expo-sharing');
-        const { uri } = await Print.printToFileAsync({ html, base64: false });
-        if (await Sharing.isAvailableAsync()) {
-          await Sharing.shareAsync(uri, { mimeType: 'application/pdf', dialogTitle: `${report.clinic.name} — ${report.period.label}`, UTI: 'com.adobe.pdf' });
-        }
-      }
-    } catch (e: any) { console.warn('[billing] clinic PDF failed:', e.message); }
-    finally { setExporting(false); }
+      exportClinicXlsx(report);
+    } catch (e: any) { console.warn('[billing] clinic Excel failed:', e.message); }
   };
 
   return (
@@ -1563,12 +1344,12 @@ ${cptSummaryRows ? `<div class="section-title">CPT Code Summary</div>
 
         {/* Export button at the top */}
         <Pressable
-          onPress={exportClinicPdf}
-          disabled={exporting || !report}
-          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 40, borderRadius: 999, backgroundColor: colors.primary, opacity: (exporting || !report) ? 0.5 : 1 }}
+          onPress={exportClinicXlsxHandler}
+          disabled={!report}
+          style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, height: 40, borderRadius: 999, backgroundColor: colors.primary, opacity: !report ? 0.5 : 1 }}
         >
-          <FileText size={14} color="#fff" />
-          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>{exporting ? 'Generating PDF…' : 'Export Insurance Report PDF'}</Text>
+          <Download size={14} color="#fff" />
+          <Text style={{ color: '#fff', fontWeight: '700', fontSize: 13 }}>Export Clinic Report Excel</Text>
         </Pressable>
       </Card>
 

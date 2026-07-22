@@ -1,6 +1,6 @@
 import { supabaseAdmin } from "./supabase";
 import { getTenoviSummary, getTenoviReadingsByFacility, listAllTenoviPatients } from "../services/tenovi";
-import { getSmartMeterSummary, listSmartMeterPatients, getSmartMeterReadingsByPatient } from "../services/smartmeter";
+import { getSmartMeterSummary, listSmartMeterPatients, getSmartMeterReadingsByPatient, getSmartMeterReviewTime } from "../services/smartmeter";
 import { upsertPatientCycleStats } from "../models/billing";
 
 type ClinicRow = { id: string; name: string; smartmeter_api_key: string | null };
@@ -211,7 +211,56 @@ export async function syncReadingCounts(clinics: ClinicRow[]): Promise<void> {
       }));
 
       await upsertPatientCycleStats(statsRows);
-      console.log(`[sync:billing] ${clinic.name}: ${statsRows.length} reading stats updated`);
+
+      // ── SmartMeter review time sync ──────────────────────────────────────
+      // SmartMeter has no bulk review-time endpoint, so we call per-patient
+      // in parallel batches of 10 to stay within API rate limits.
+      const CONCURRENCY = 10;
+      let reviewSynced = 0;
+
+      for (let j = 0; j < patients.length; j += CONCURRENCY) {
+        const chunk = patients.slice(j, j + CONCURRENCY);
+        const results = await Promise.allSettled(
+          chunk.map(async (p) => {
+            const entries = await getSmartMeterReviewTime(
+              clinic.smartmeter_api_key,
+              p.external_patient_id,
+            );
+            // Filter to current calendar month and sum total seconds
+            const totalSecs = entries
+              .filter((e) => {
+                const d = (e.clock_start as string).slice(0, 10);
+                return d >= cycleStartStr && d <= cycleEndStr;
+              })
+              .reduce((s, e) => s + (e.review_duration_seconds ?? 0), 0);
+            return { patientId: p.id, totalSecs };
+          }),
+        );
+
+        const reviewRows = results
+          .filter((r): r is PromiseFulfilledResult<{ patientId: string; totalSecs: number }> =>
+            r.status === "fulfilled" && r.value.totalSecs > 0,
+          )
+          .map((r) => ({
+            patient_id:       r.value.patientId,
+            clock_start:      `${cycleStartStr}T00:00:00+00:00`,
+            duration_seconds: r.value.totalSecs,
+            source:           "smartmeter_sync",
+            synced_at:        now.toISOString(),
+          }));
+
+        if (reviewRows.length > 0) {
+          const ids = reviewRows.map((r) => r.patient_id);
+          await supabaseAdmin.from("patient_review_times")
+            .delete()
+            .in("patient_id", ids)
+            .eq("source", "smartmeter_sync");
+          await supabaseAdmin.from("patient_review_times").insert(reviewRows);
+          reviewSynced += reviewRows.length;
+        }
+      }
+
+      console.log(`[sync:billing] ${clinic.name}: ${statsRows.length} reading stats, ${reviewSynced} review times updated`);
     } catch (err) {
       console.warn(`[sync:billing] SmartMeter reading sync failed for ${clinic.name}:`, err);
     }
