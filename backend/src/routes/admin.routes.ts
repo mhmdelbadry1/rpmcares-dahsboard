@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
   inviteMember,
+  listAuditLog,
   listMembers,
   removeMember,
   resetPassword,
@@ -21,3 +22,4 @@ adminRouter.delete("/members/:id",             removeMember);
 adminRouter.post("/members/:id/reset-password", resetPassword);
 adminRouter.post("/members/:id/suspend",       suspendMember);
 adminRouter.post("/members/:id/unsuspend",     unsuspendMember);
+adminRouter.get("/audit-log",                  listAuditLog);

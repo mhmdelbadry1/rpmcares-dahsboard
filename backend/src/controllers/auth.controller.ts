@@ -2,6 +2,7 @@ import type { Request, Response } from "express";
 import { z } from "zod";
 import { supabaseAdmin, supabaseAnon } from "../lib/supabase";
 import { findProfileById, type ProfileRecord } from "../models/profile";
+import { logAudit } from "../services/audit";
 
 const SUSPENDED_MSG = "Your account has been suspended. Contact your administrator.";
 
@@ -67,6 +68,9 @@ export async function login(req: Request, res: Response) {
   if (!profile) {
     return res.status(403).json({ error: "This account has no RPMCares profile yet." });
   }
+
+  logAudit(profile, "login", "Successful sign-in", profile.clinic_id)
+    .catch((e) => console.warn("[audit] login failed:", e));
 
   return res.json({
     token: data.session.access_token,

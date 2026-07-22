@@ -4,6 +4,7 @@ import { env } from "../env";
 import { supabaseAdmin } from "../lib/supabase";
 import { findClinicById } from "../models/clinic";
 import { createProfile, deleteProfile, findProfileById, listProfiles, updateProfile } from "../models/profile";
+import { logAudit } from "../services/audit";
 
 // Supabase AuthApiError properties are non-enumerable → JSON.stringify gives '{}'
 // This helper always extracts a human-readable string.
@@ -121,6 +122,9 @@ export async function inviteMember(req: Request, res: Response) {
     console.error("[invite] Profile upsert threw:", err);
   }
 
+  logAudit(caller, "member_invited", `Invited ${email} as ${role}`, resolvedClinicId)
+    .catch((e) => console.warn("[audit] member_invited failed:", e));
+
   return res.status(201).json({ ok: true, emailSent, emailError, inviteLink, email });
 }
 
@@ -197,6 +201,9 @@ export async function removeMember(req: Request, res: Response) {
     // Non-fatal — the auth user is gone, so the account is effectively removed
   }
 
+  logAudit(caller, "member_removed", `Removed ${target.email} (${target.role})`, target.clinic_id)
+    .catch((e) => console.warn("[audit] member_removed failed:", e));
+
   return res.json({ ok: true });
 }
 
@@ -243,6 +250,10 @@ export async function updateMember(req: Request, res: Response) {
     },
   });
 
+  const changes = Object.entries(patch).map(([k, v]) => `${k}: ${v}`).join(", ");
+  logAudit(caller, "member_updated", `Updated ${target.email} (${changes})`, updated.clinic_id)
+    .catch((e) => console.warn("[audit] member_updated failed:", e));
+
   return res.json({ member: updated });
 }
 
@@ -275,6 +286,9 @@ export async function resetPassword(req: Request, res: Response) {
     return res.status(400).json({ error: extractMsg(error, "Could not generate reset link.") });
   }
 
+  logAudit(caller, "password_reset_requested", `Requested password reset for ${target.email}`, target.clinic_id)
+    .catch((e) => console.warn("[audit] password_reset_requested failed:", e));
+
   return res.json({ ok: true, resetLink: data.properties.action_link, email: target.email });
 }
 
@@ -298,6 +312,9 @@ export async function suspendMember(req: Request, res: Response) {
   });
   if (error) return res.status(400).json({ error: extractMsg(error, "Could not suspend user.") });
 
+  logAudit(caller, "member_suspended", `Suspended ${target.email}`, target.clinic_id)
+    .catch((e) => console.warn("[audit] member_suspended failed:", e));
+
   return res.json({ ok: true });
 }
 
@@ -315,7 +332,35 @@ export async function unsuspendMember(req: Request, res: Response) {
   });
   if (error) return res.status(400).json({ error: extractMsg(error, "Could not unsuspend user.") });
 
+  logAudit(caller, "member_unsuspended", `Unsuspended ${target.email}`, target.clinic_id)
+    .catch((e) => console.warn("[audit] member_unsuspended failed:", e));
+
   return res.json({ ok: true });
+}
+
+// ── Audit log ─────────────────────────────────────────────────────────────────
+// GET /api/admin/audit-log
+// Non-super_admins are scoped to their own clinic, matching the same
+// pattern used for communications/billing elsewhere in the app.
+
+export async function listAuditLog(req: Request, res: Response) {
+  const caller = req.profile!;
+  const limit = Math.min(parseInt((req.query.limit as string) ?? "50", 10) || 50, 200);
+
+  let q = supabaseAdmin
+    .from("audit_log")
+    .select("*")
+    .order("created_at", { ascending: false })
+    .limit(limit);
+
+  if (caller.role !== "super_admin") {
+    if (!caller.clinic_id) return res.json({ events: [] });
+    q = q.eq("clinic_id", caller.clinic_id);
+  }
+
+  const { data, error } = await q;
+  if (error) return res.status(500).json({ error: error.message });
+  return res.json({ events: data });
 }
 
 // ── Email template ─────────────────────────────────────────────────────────────

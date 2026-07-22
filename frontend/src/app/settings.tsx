@@ -2,7 +2,7 @@
   Building2, CheckCircle2, ChevronRight, Eye, EyeOff, Globe, HeartPulse,
   KeyRound, Mail, Settings2, ShieldCheck, User, Zap,
 } from "lucide-react-native";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet,
   Text, TextInput, View,
@@ -13,7 +13,7 @@ import { StatusPill } from "@/components/ui/status-pill";
 import { useAuth } from "@/contexts/auth-context";
 import { ROLE_META } from "@/contexts/role-context";
 import { useTheme } from "@/hooks/use-theme";
-import { api, ApiError } from "@/lib/api";
+import { api, ApiError, type AuditEvent } from "@/lib/api";
 
 // ── Tab bar ───────────────────────────────────────────────────────────────
 const TABS = ["Profile", "Organization", "Roles", "Audit"] as const;
@@ -374,15 +374,83 @@ function RolesTab() {
 }
 
 // ── Audit tab ─────────────────────────────────────────────────────────────
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  member_invited: "Member invited",
+  member_removed: "Member removed",
+  member_updated: "Member updated",
+  member_suspended: "Member suspended",
+  member_unsuspended: "Member unsuspended",
+  password_reset_requested: "Password reset requested",
+  clinic_created: "Clinic created",
+  clinic_updated: "Clinic updated",
+  clinic_deleted: "Clinic deleted",
+  login: "Login",
+  review_time_deleted: "Review time deleted",
+};
+
+function formatAuditAction(action: string): string {
+  return AUDIT_ACTION_LABELS[action]
+    ?? action.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+function auditTimeAgo(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
 function AuditTab() {
   const colors = useTheme();
-  const EVENTS = [
-    { action: "User invited", user: "admin@rpmcares.local", detail: "Invited staff@clinic.com as Staff", time: "2 min ago" },
-    { action: "Clinic created", user: "admin@rpmcares.local", detail: "Created Cedar Park Internal Medicine", time: "1 hr ago" },
-    { action: "Alert resolved", user: "staff@rpmcares.local", detail: "Alert #4821 marked resolved", time: "3 hrs ago" },
-    { action: "Login", user: "admin@rpmcares.local", detail: "Successful sign-in from mobile app", time: "5 hrs ago" },
-    { action: "Dashboard viewed", user: "admin@rpmcares.local", detail: "Loaded Command Center dashboard", time: "5 hrs ago" },
-  ];
+  const { session } = useAuth();
+  const [events, setEvents] = useState<AuditEvent[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const token = session?.token;
+    if (!token) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const { events: data } = await api.listAuditLog(token);
+        if (!cancelled) setEvents(data);
+      } catch (err) {
+        if (!cancelled) setError(err instanceof ApiError ? err.message : "Could not load audit log.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [session?.token]);
+
+  if (loading) {
+    return (
+      <Card style={{ padding: 32, alignItems: "center" }}>
+        <ActivityIndicator color={colors.primary} />
+      </Card>
+    );
+  }
+
+  if (error) {
+    return (
+      <Card style={{ padding: 24, alignItems: "center" }}>
+        <Text style={{ color: colors.critical, fontSize: 12.5, fontWeight: "600" }}>{error}</Text>
+      </Card>
+    );
+  }
+
+  if (!events.length) {
+    return (
+      <Card style={{ padding: 24, alignItems: "center" }}>
+        <Text style={{ color: colors.textSecondary, fontSize: 13 }}>No audit events yet.</Text>
+      </Card>
+    );
+  }
+
   return (
     <Card style={{ padding: 0 }}>
       <View style={[styles.tableHead, { backgroundColor: colors.surface, borderBottomColor: colors.border }]}>
@@ -390,14 +458,14 @@ function AuditTab() {
         <Text style={[styles.thCell, { color: colors.textSecondary, flex: 2 }]}>Detail</Text>
         <Text style={[styles.thCell, { color: colors.textSecondary, flex: 1, textAlign: "right" }]}>When</Text>
       </View>
-      {EVENTS.map((e, i) => (
-        <View key={i} style={[styles.tableRow, i > 0 && { borderTopColor: colors.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
+      {events.map((e, i) => (
+        <View key={e.id} style={[styles.tableRow, i > 0 && { borderTopColor: colors.border, borderTopWidth: StyleSheet.hairlineWidth }]}>
           <View style={{ flex: 1.5 }}>
-            <Text style={[styles.tdRole, { color: colors.text }]}>{e.action}</Text>
-            <Text style={[{ fontSize: 10.5, color: colors.textSecondary, marginTop: 1 }]}>{e.user}</Text>
+            <Text style={[styles.tdRole, { color: colors.text }]}>{formatAuditAction(e.action)}</Text>
+            <Text style={[{ fontSize: 10.5, color: colors.textSecondary, marginTop: 1 }]}>{e.actor_email}</Text>
           </View>
           <Text style={[styles.tdCell, { color: colors.textSecondary, flex: 2 }]}>{e.detail}</Text>
-          <Text style={[styles.tdCell, { color: colors.textSecondary, flex: 1, textAlign: "right" }]}>{e.time}</Text>
+          <Text style={[styles.tdCell, { color: colors.textSecondary, flex: 1, textAlign: "right" }]}>{auditTimeAgo(e.created_at)}</Text>
         </View>
       ))}
     </Card>

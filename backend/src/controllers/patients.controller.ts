@@ -31,6 +31,7 @@ import {
 } from "../services/smartmeter";
 import { getTenoviPatientReadings } from "../services/patient-readings";
 import { recordReviewTime } from "../services/review-time";
+import { logAudit } from "../services/audit";
 
 export async function list(req: Request, res: Response) {
   const profile = await findProfileById(req.auth!.sub);
@@ -677,6 +678,12 @@ export async function deleteReviewTime(req: Request, res: Response) {
   }
 
   await supabaseAdmin.from("patient_review_times").delete().eq("id", entryId);
+
+  if (profile) {
+    logAudit(profile, "review_time_deleted", `Deleted review time entry for ${patient.full_name}`, patient.clinic_id)
+      .catch((e) => console.warn("[audit] review_time_deleted failed:", e));
+  }
+
   return res.json({
     ok: true,
     tenoviNote: tenoviVoided

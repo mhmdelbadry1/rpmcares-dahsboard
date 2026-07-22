@@ -38,6 +38,17 @@ export type Member = {
   banned_until?: string | null;
 };
 
+export type AuditEvent = {
+  id: string;
+  actor_id: string | null;
+  actor_name: string;
+  actor_email: string;
+  clinic_id: string | null;
+  action: string;
+  detail: string;
+  created_at: string;
+};
+
 export type Clinic = {
   id: string;
   name: string;
@@ -679,6 +690,8 @@ export const api = {
     request<{ ok: true }>(`/api/admin/members/${id}/suspend`, { method: 'POST' }, token),
   unsuspendMember: (token: string, id: string) =>
     request<{ ok: true }>(`/api/admin/members/${id}/unsuspend`, { method: 'POST' }, token),
+  listAuditLog: (token: string, limit = 50) =>
+    request<{ events: AuditEvent[] }>(`/api/admin/audit-log?limit=${limit}`, { method: 'GET' }, token),
 
   listClinics: (token: string) => request<{ clinics: Clinic[] }>('/api/clinics', { method: 'GET' }, token),
   createClinic: (token: string, name: string) =>
