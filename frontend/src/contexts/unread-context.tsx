@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
 import { AppState, type AppStateStatus } from 'react-native';
 import { api, type CommSummary } from '@/lib/api';
+import { supabase } from '@/lib/supabase';
 import { useAuth } from './auth-context';
 
 type UnreadContextValue = {
@@ -91,10 +92,51 @@ export function UnreadProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (!token) { setCounts({}); return; }
     refresh();
-    // Poll every 60s
+    // Poll every 60s as a fallback in case the realtime subscription below
+    // ever misses an event or disconnects.
     intervalRef.current = setInterval(refresh, 60_000);
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
   }, [token, refresh]);
+
+  // Push-driven refresh: without this, a new message from a patient you
+  // aren't currently viewing (or aren't viewing at all — e.g. sitting on the
+  // sidebar) only shows up in the unread badge / "Unread" filter up to 60s
+  // later via the poll above. Scoped to the caller's own clinic (matching
+  // the same scoping getUnreadCounts already applies server-side) so a
+  // clinic_admin/staff doesn't even get woken up for another clinic's
+  // traffic; super_admin has no clinic_id, so it subscribes unfiltered.
+  useEffect(() => {
+    if (!token) return;
+    const role = session?.user.role;
+    const clinicId = session?.user.clinicId;
+    if (role !== 'super_admin' && !clinicId) return;
+    const filter = role === 'super_admin' ? undefined : `clinic_id=eq.${clinicId}`;
+
+    let debounce: ReturnType<typeof setTimeout> | null = null;
+    const debouncedRefresh = () => {
+      if (debounce) clearTimeout(debounce);
+      debounce = setTimeout(refresh, 400);
+    };
+
+    const channel = supabase
+      .channel('unread-counts-global')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'communications_log', ...(filter ? { filter } : {}) },
+        debouncedRefresh,
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'communications_log', ...(filter ? { filter } : {}) },
+        debouncedRefresh,
+      )
+      .subscribe();
+
+    return () => {
+      if (debounce) clearTimeout(debounce);
+      supabase.removeChannel(channel);
+    };
+  }, [token, session?.user.role, session?.user.clinicId, refresh]);
 
   // Re-fetch when app comes back to foreground
   useEffect(() => {
