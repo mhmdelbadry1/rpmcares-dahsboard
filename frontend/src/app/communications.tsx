@@ -380,7 +380,7 @@ export default function CommunicationsScreen() {
   const searchRef                     = useRef('');
   const [selected, setSelected]       = useState<Patient | null>(null);
   const [commFilter, setCommFilter]   = useState<'all' | 'unread' | 'calls' | 'sms'>('all');
-  const [sortMode, setSortMode]       = useState<'recent' | 'name' | 'unread'>('recent');
+  const [sortMode, setSortMode]       = useState<'recent' | 'name'>('recent');
 
   // Full patient list for filter/sort — loaded in background after initial page
   const [allPatients, setAllPatients] = useState<Patient[]>([]);
@@ -936,8 +936,6 @@ export default function CommunicationsScreen() {
     // Sort
     if (sortMode === 'name') {
       list = [...list].sort((a, b) => a.full_name.localeCompare(b.full_name));
-    } else if (sortMode === 'unread') {
-      list = [...list].sort((a, b) => (unreadCounts[b.id]?.unread ?? 0) - (unreadCounts[a.id]?.unread ?? 0));
     } else {
       // Recent: patients with no communications sink to the bottom
       list = [...list].sort((a, b) => {
@@ -1056,10 +1054,10 @@ export default function CommunicationsScreen() {
 
         {/* Sort + mark all read */}
         <View style={s.sortRow}>
-          {(['recent', 'name', 'unread'] as const).map(m => (
+          {(['recent', 'name'] as const).map(m => (
             <Pressable key={m} style={[s.sortBtn, sortMode === m && s.sortBtnActive]} onPress={() => setSortMode(m)}>
               <Text style={[s.sortBtnText, sortMode === m && s.sortBtnTextActive]}>
-                {m === 'recent' ? 'Recent' : m === 'name' ? 'Name' : 'Most unread'}
+                {m === 'recent' ? 'Recent' : 'Name'}
               </Text>
             </Pressable>
           ))}
