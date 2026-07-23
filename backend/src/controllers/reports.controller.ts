@@ -32,15 +32,17 @@ function buildCategories(
   notes:             any[],
   reviewTimes:       any[],
   records:           any[],
+  patientProgram:    string,
   totalReadingCount: number | null = null,
 ) {
-  // Review time from patient_review_times — the only time source; timer removed per spec
+  // Review time from patient_review_times — the only time source; timer removed per spec.
+  // A patient is enrolled in exactly one program, so all of their review time
+  // belongs to that program only — it must never appear under the other three.
   const totalReviewSeconds = reviewTimes.reduce((s: number, r: any) => s + (r.duration_seconds ?? 0), 0);
   const totalReviewMinutes = Math.round(totalReviewSeconds / 60);
 
   return PROGRAM_CATEGORIES.map((cat) => {
-    // Review time counts toward RPM; other programs use time_logs which are removed
-    const reviewMinutes = cat.program === "RPM" ? totalReviewMinutes : 0;
+    const reviewMinutes = cat.program === patientProgram ? totalReviewMinutes : 0;
     const totalMinutes  = reviewMinutes;
 
     const catNotes   = notes.filter((n) =>
@@ -207,7 +209,7 @@ export async function getPatientReport(req: Request, res: Response): Promise<voi
   const signedNote = notes.find((n) => n.signed_at);
   const provider   = signedNote?.profiles?.name ?? null;
 
-  const categories = buildCategories(notes, reviews, records, totalReadingCount);
+  const categories = buildCategories(notes, reviews, records, patient.program, totalReadingCount);
   const carePlan   = carePlanRow
     ? {
         id:          carePlanRow.id,
@@ -343,13 +345,19 @@ export async function getClinicReport(req: Request, res: Response): Promise<void
     const totalProjected = ptRecords.reduce((s: number, r: any) => s + parseFloat(r.projected_amount ?? "0"), 0);
     const insuranceType  = ptRecords[0]?.insurance_type ?? null;
 
+    // A patient is enrolled in exactly one program — their tracked minutes
+    // belong to that program only and must never be attributed to the other
+    // three (previously `minutes: totalMinutes` was assigned unconditionally
+    // to every category, so every patient with any tracked time appeared to
+    // have met the threshold for all four programs at once).
     const byProgram = PROGRAM_CATEGORIES.map((cat) => {
       const progRecords = ptRecords.filter((r: any) => (cat.cptCodes as readonly string[]).includes(r.cpt_code));
       const readings    = progRecords.reduce((s: number, r: any) => s + (r.reading_count ?? 0), 0);
-      const thresholdMet = totalMinutes >= cat.thresholdMinutes;
+      const minutes     = cat.program === p.program ? totalMinutes : 0;
+      const thresholdMet = minutes >= cat.thresholdMinutes;
       return {
         program: cat.program, cptCodes: progRecords.map((r: any) => r.cpt_code),
-        minutes: totalMinutes, readings, thresholdMet,
+        minutes, readings, thresholdMet,
         billingStatus: progRecords[0]?.status ?? null,
         projectedAmount: progRecords.reduce((s: number, r: any) => s + parseFloat(r.projected_amount ?? "0"), 0),
       };
